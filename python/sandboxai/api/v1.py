@@ -32,6 +32,9 @@ class RunIPythonCellRequest(BaseModel):
         False,
         description="Set to true to split the output into stdout and stderr. If set, the output field in the response will be empty and the stdout and stderr fields will be populated.",
     )
+    action_id: Optional[str] = Field(
+        None, description="The ID of the action being executed. Used for observation tracking."
+    )
 
 
 class RunIPythonCellResult(BaseModel):
@@ -48,6 +51,9 @@ class RunIPythonCellResult(BaseModel):
 
 class RunShellCommandRequest(BaseModel):
     command: str = Field(..., description="The command to execute.")
+    action_id: Optional[str] = Field(
+        None, description="The ID of the action being executed. Used for observation tracking."
+    )
     split_output: Optional[bool] = Field(
         False,
         description="Set to true to split the output into stdout and stderr. If set, the output field in the response will be empty and the stdout and stderr fields will be populated.",

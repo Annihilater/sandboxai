@@ -14,8 +14,8 @@ import (
 	"math/rand"
 
 	"github.com/docker/docker/api/types"
-	v1 "github.com/substratusai/sandboxai/go/api/v1"
-	sclient "github.com/substratusai/sandboxai/go/sandboxaid/client"
+	v1 "github.com/foreveryh/sandboxai/go/api/v1"
+	sclient "github.com/foreveryh/sandboxai/go/mentisruntime/client" // Corrected import path
 )
 
 const (

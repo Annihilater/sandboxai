@@ -1,8 +1,10 @@
-BOX_IMG := substratusai/sandboxai-box:$(shell git describe --tags --dirty --always)
+BOX_IMG := mentisai/sandboxai-box:$(shell git describe --tags --dirty --always)
+BOX_IMG_LATEST := mentisai/sandboxai-box:latest
 
 .PHONY: build-box-image
 build-box-image:
-	docker build . -f box.Dockerfile --progress=plain -t $(BOX_IMG)
+	docker build . -f box.Dockerfile --progress=plain -t $(BOX_IMG) -t $(BOX_IMG_LATEST)
+	@echo "Built two images: $(BOX_IMG) and $(BOX_IMG_LATEST)"
 
 UV := $(shell which uv)
 

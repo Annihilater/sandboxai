@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	v1 "github.com/substratusai/sandboxai/go/api/v1"
+	v1 "github.com/foreveryh/sandboxai/go/api/v1"
 )
 
 var ErrSandboxNotFound = fmt.Errorf("sandbox not found")

@@ -11,12 +11,12 @@ WORKDIR /sandboxai
 RUN python3 -m venv venv
 ENV PATH="/sandboxai/venv/bin:$PATH"
 
-COPY ./python/boxd/requirements.txt ./
+COPY ./python/mentis_executor/requirements.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
-COPY ./python/boxd ./boxd
 COPY ./python/sandboxai ./sandboxai
+COPY ./python/mentis_executor ./mentis_executor
 
 WORKDIR /work
 
-CMD ["uvicorn", "boxd.main:app", "--app-dir=/sandboxai", "--host=0.0.0.0"]
+CMD ["uvicorn", "mentis_executor.main:app", "--app-dir=/sandboxai", "--host=0.0.0.0"]
