@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io" // Added for reading response body
 	"log/slog"
@@ -102,6 +103,7 @@ func (m *SandboxManager) InitiateAction(ctx context.Context, sandboxID string, a
 	}
 
 	// Launch the goroutine to handle the actual execution and streaming
+	m.logger.Debug("Initiating action goroutine", "sandboxID", sandboxID, "actionID", actionID, "actionType", actionType) // 添加这行
 	go m.handleActionExecution(context.Background(), sandboxID, actionID, agentURL, requestBody, actionType)
 
 	m.logger.Info("Action initiated", "sandboxID", sandboxID, "actionID", actionID, "actionType", actionType)
@@ -110,9 +112,10 @@ func (m *SandboxManager) InitiateAction(ctx context.Context, sandboxID string, a
 
 // Observation types (Placeholders - define properly later)
 type Observation struct {
-	Type     string      `json:"type"` // e.g., "start", "stream", "error", "end"
-	ActionID string      `json:"action_id"`
-	Data     interface{} `json:"data,omitempty"`
+	ObservationType string      `json:"observation_type"` 
+	ActionID        string      `json:"action_id"`
+	Timestamp       string      `json:"timestamp"`
+	Data            interface{} `json:"data,omitempty"`
 }
 
 type StartObservationData struct {
@@ -147,6 +150,7 @@ type AgentObservation struct {
 // It only handles the initial request and immediate HTTP errors.
 // Subsequent observations (stream, result) are handled by ReceiveInternalObservation.
 func (m *SandboxManager) handleActionExecution(ctx context.Context, sandboxID, actionID, agentURL string, requestBody []byte, actionType string) {
+	m.logger.Debug("Goroutine started for action", "sandboxID", sandboxID, "actionID", actionID, "actionType", actionType) 
 	// Send StartObservation immediately via the Hub
 	m.pushObservation(sandboxID, actionID, "start", StartObservationData{})
 
@@ -196,9 +200,10 @@ func (m *SandboxManager) handleActionExecution(ctx context.Context, sandboxID, a
 // pushObservation formats and sends an observation via the hub.
 func (m *SandboxManager) pushObservation(sandboxID, actionID, obsType string, data interface{}) {
 	obs := Observation{
-		Type:     obsType,
-		ActionID: actionID,
-		Data:     data,
+		ObservationType: obsType, // Use the renamed field
+		ActionID:        actionID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano), // Add current timestamp
+		Data:            data,
 	}
 
 	jsonData, err := json.Marshal(obs)
@@ -218,25 +223,24 @@ func (m *SandboxManager) pushErrorObservation(sandboxID, actionID, errorMsg stri
 	m.pushObservation(sandboxID, actionID, "error", ErrorObservationData{Error: errorMsg})
 }
 
-// --- Sandbox Lifecycle Management --- 
-
 // CreateSandbox creates a new sandbox container.
 // It pulls the necessary image, creates and starts the container,
-// discovers its IP address, and stores its state.
+// discovers its IP address, performs a health check on the agent,
+// and stores its state.
 func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (string /* sandboxID */, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	sandboxID := uuid.NewString() // Generate a unique ID
-	
+
 	// Get image name from environment variable or use default
 	imageName := os.Getenv("BOX_IMAGE")
 	if imageName == "" {
 		imageName = "mentisai/sandboxai-box:latest" // Default if no environment variable set
 	}
 	m.logger.Debug("Using box image", "image", imageName)
-	
-	agentPort := "8000/tcp" // Default agent port inside the container - CHANGED FROM 9090
+
+	agentPort := "8000/tcp" // Default agent port inside the container
 
 	m.logger.Info("Creating sandbox", "sandboxID", sandboxID, "image", imageName)
 
@@ -271,13 +275,12 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	}
 
 	// Add an explicit check after pulling to ensure the image exists locally
+	// Use a new context for this inspection to avoid using the already potentially cancelled inspectCtx
 	inspectCtx2, inspectCancel2 := context.WithTimeout(ctx, 10*time.Second)
 	defer inspectCancel2()
 	_, _, errInspect2 := m.dockerClient.ImageInspectWithRaw(inspectCtx2, imageName)
 	if errInspect2 != nil {
 		m.logger.Error("Image inspect failed after pull", "image", imageName, "error", errInspect2)
-		// Attempt to pull again, maybe there was a transient issue?
-		// For now, just return the error.
 		return "", fmt.Errorf("image %s not found locally after pull attempt: %w", imageName, errInspect2)
 	}
 	m.logger.Info("Image confirmed to exist locally", "image", imageName)
@@ -290,7 +293,7 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	}
 	// Determine the host address Runtime is listening on, as seen from the container
 	// Using host.docker.internal which works for Docker Desktop. Might need configuration for other environments.
-	runtimeHost := "host.docker.internal" 
+	runtimeHost := "host.docker.internal"
 	// Get the port Runtime is listening on (assuming it's passed via env var or default)
 	runtimePort := os.Getenv("SANDBOXAID_PORT")
 	if runtimePort == "" {
@@ -319,9 +322,9 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 			// OpenStdin:    false,
 		},
 		&container.HostConfig{
-			// AutoRemove: true, // Automatically remove container when it exits
+			// AutoRemove: true, // Consider adding this if desired
 			// PortBindings: nat.PortMap{ // Example: Map to host port if needed
-			//  agentPort: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: ""}}, // Empty HostPort for dynamic assignment
+			// 	nat.Port(agentPort): []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: "0"}}, // Empty HostPort for dynamic assignment
 			// },
 		},
 		&network.NetworkingConfig{ // Default network is usually fine
@@ -351,9 +354,10 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	}
 
 	// 4. Inspect the container to get its IP address on the default bridge network
-	inspectCtx, inspectCancel = context.WithTimeout(ctx, 10*time.Second) // Changed := to =
-	defer inspectCancel()
-	inspectData, err := m.dockerClient.ContainerInspect(inspectCtx, resp.ID)
+	// Use a new context for this inspection
+	inspectStartCtx, inspectStartCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer inspectStartCancel()
+	inspectData, err := m.dockerClient.ContainerInspect(inspectStartCtx, resp.ID)
 	if err != nil {
 		m.logger.Error("Failed to inspect container after start", "sandboxID", sandboxID, "containerID", resp.ID, "error", err)
 		// Consider stopping and removing the container here as well
@@ -363,17 +367,27 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	// Find IP address - assumes default bridge network
 	var containerIP string
 	if inspectData.NetworkSettings != nil && inspectData.NetworkSettings.Networks != nil {
-		for _, netSettings := range inspectData.NetworkSettings.Networks {
-			if netSettings.IPAddress != "" && !strings.HasPrefix(netSettings.IPAddress, "172.17.") { // Basic check, might need refinement
+		// Prefer non-default bridge network if available (more robust)
+		for name, netSettings := range inspectData.NetworkSettings.Networks {
+			if name != "bridge" && netSettings.IPAddress != "" {
 				containerIP = netSettings.IPAddress
+				m.logger.Debug("Found container IP on non-default network", "network", name, "ip", containerIP)
 				break
 			}
 		}
-		// Fallback to the first available IP if specific one not found
+        // Fallback to bridge network if no other IP found
 		if containerIP == "" {
-			for _, netSettings := range inspectData.NetworkSettings.Networks {
+			if bridgeSettings, ok := inspectData.NetworkSettings.Networks["bridge"]; ok && bridgeSettings.IPAddress != "" {
+				containerIP = bridgeSettings.IPAddress
+				m.logger.Debug("Found container IP on default bridge network", "ip", containerIP)
+			}
+        }
+		// Fallback to the first available IP if still not found (less ideal)
+		if containerIP == "" {
+			for name, netSettings := range inspectData.NetworkSettings.Networks {
 				if netSettings.IPAddress != "" {
 					containerIP = netSettings.IPAddress
+					m.logger.Warn("Falling back to first available container IP", "network", name, "ip", containerIP)
 					break
 				}
 			}
@@ -381,17 +395,96 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	}
 
 	if containerIP == "" {
-		m.logger.Error("Failed to find container IP address", "sandboxID", sandboxID, "containerID", resp.ID)
+		m.logger.Error("Failed to find container IP address", "sandboxID", sandboxID, "containerID", resp.ID, "networks", inspectData.NetworkSettings.Networks)
 		// Consider stopping and removing the container
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer rmCancel()
+		_ = m.dockerClient.ContainerRemove(rmCtx, resp.ID, container.RemoveOptions{Force: true})
 		return "", fmt.Errorf("failed to find IP address for container %s", resp.ID)
 	}
 
 	// 5. Construct Agent URL
-	// Extract port number from agentPort string like "9090/tcp"
 	portNum := strings.Split(agentPort, "/")[0]
 	agentURL := fmt.Sprintf("http://%s:%s", containerIP, portNum)
 
-	m.logger.Info("Sandbox container started successfully", "sandboxID", sandboxID, "containerID", resp.ID, "containerIP", containerIP, "agentURL", agentURL)
+	// --- START: ADDED HEALTH CHECK ---
+	m.logger.Info("Waiting for agent health check", "agentURL", agentURL, "sandboxID", sandboxID)
+	healthCheckURL := fmt.Sprintf("%s/healthz", agentURL) // Agent defined this in main.py [source: 429]
+	agentReady := false
+	// Use a context separate from the main CreateSandbox context for the health check timeout
+	// Use context.Background() as base to avoid cancellation if the parent ctx cancels early
+	healthCheckCtx, healthCheckCancel := context.WithTimeout(context.Background(), 30*time.Second) // 30-second timeout for agent to start
+	defer healthCheckCancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond) // Check every 500ms
+	defer ticker.Stop()
+
+	// Store last error for better reporting on timeout
+	var lastHealthCheckErr error
+
+	for !agentReady {
+		select {
+		case <-healthCheckCtx.Done():
+			// Timeout reached
+			m.logger.Error("Agent health check timed out", "sandboxID", sandboxID, "agentURL", agentURL, "timeout", "30s", "lastError", lastHealthCheckErr)
+			// Attempt to cleanup the failed container
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 15*time.Second) // Slightly longer timeout for cleanup
+			defer rmCancel()
+			m.logger.Info("Attempting to stop and remove container after failed health check", "containerID", resp.ID)
+			stopTimeout := 5 * time.Second // Quick stop attempt
+			stopTimeoutInt := int(stopTimeout.Seconds())
+			// Use background context for cleanup attempt
+			_ = m.dockerClient.ContainerStop(context.Background(), resp.ID, container.StopOptions{Timeout: &stopTimeoutInt})
+			if rmErr := m.dockerClient.ContainerRemove(rmCtx, resp.ID, container.RemoveOptions{Force: true, RemoveVolumes: true}); rmErr != nil {
+				m.logger.Error("Failed to remove container after health check failure", "containerID", resp.ID, "removeError", rmErr)
+			} else {
+				m.logger.Info("Successfully removed container after health check failure", "containerID", resp.ID)
+			}
+			if lastHealthCheckErr != nil {
+				return "", fmt.Errorf("agent for sandbox %s (%s) did not become healthy within timeout: last error: %w", sandboxID, agentURL, lastHealthCheckErr)
+			}
+			return "", fmt.Errorf("agent for sandbox %s (%s) did not become healthy within timeout", sandboxID, agentURL)
+
+		case <-ticker.C:
+			// Attempt health check
+			// Use a short timeout for the individual HTTP request, derived from the overall health check context
+			reqTimeoutCtx, reqCancel := context.WithTimeout(healthCheckCtx, 2*time.Second)
+			req, err := http.NewRequestWithContext(reqTimeoutCtx, "GET", healthCheckURL, nil)
+			if err != nil {
+				// Log error creating request, but don't store as lastHealthCheckErr as it's unlikely the final cause
+				m.logger.Warn("Failed to create agent health check request (will retry)", "sandboxID", sandboxID, "error", err)
+				reqCancel() // Cancel context since request creation failed
+				continue    // Try again on next tick
+			}
+
+			respCheck, errCheck := m.httpClient.Do(req)
+			reqCancel() // Cancel the request context immediately after Do returns
+
+			if errCheck == nil {
+				// Request succeeded, check status code
+				if respCheck.StatusCode == http.StatusOK {
+					agentReady = true
+					respCheck.Body.Close() // Close the body on success
+					m.logger.Info("Agent health check successful", "sandboxID", sandboxID)
+					lastHealthCheckErr = nil // Clear last error on success
+				} else {
+					// Got a response, but not 200 OK
+					lastHealthCheckErr = fmt.Errorf("agent health check returned status %d", respCheck.StatusCode)
+					m.logger.Debug("Agent health check attempt returned non-200 status (will retry)", "sandboxID", sandboxID, "status", respCheck.StatusCode)
+					respCheck.Body.Close() // Close body even on non-200 status
+				}
+			} else {
+				// Request failed (e.g., connection refused, DNS error)
+				lastHealthCheckErr = errCheck // Store this error
+				m.logger.Debug("Agent health check attempt failed (will retry)", "sandboxID", sandboxID, "error", errCheck)
+				// No response body to close if errCheck is not nil
+			}
+		}
+	}
+	// --- END: ADDED HEALTH CHECK ---
+
+	// Agent is now ready
+	m.logger.Info("Sandbox container started successfully and agent is healthy", "sandboxID", sandboxID, "containerID", resp.ID, "containerIP", containerIP, "agentURL", agentURL)
 
 	// 6. Store the state
 	state := &SandboxState{
@@ -402,58 +495,77 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	m.sandboxes[sandboxID] = state
 
 	return sandboxID, nil
-}
+} // End of CreateSandbox function
 
 // DeleteSandbox stops and removes a sandbox container.
-// TODO: Implement the actual container removal logic using m.dockerClient.
 func (m *SandboxManager) DeleteSandbox(ctx context.Context, sandboxID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state, exists := m.sandboxes[sandboxID]
 	if !exists {
+		// Return specific error maybe? For now, fmt.Errorf is fine.
+		// Could define var ErrSandboxNotFound = errors.New("sandbox not found")
 		return fmt.Errorf("sandbox %s not found", sandboxID)
 	}
 
 	m.logger.Info("Deleting sandbox", "sandboxID", sandboxID, "containerID", state.ContainerID)
 
-	// --- Placeholder Logic --- 
-	// Replace with actual Docker interaction (stop, remove container)
 	// 1. Stop the container
 	// Use a reasonable timeout for stop operation
-	stopTimeout := 10 * time.Second // 10 seconds
+	stopTimeout := 10 * time.Second
 	stopCtx, stopCancel := context.WithTimeout(ctx, stopTimeout)
 	defer stopCancel()
 
 	m.logger.Debug("Stopping container", "containerID", state.ContainerID, "timeout", stopTimeout)
-	stopTimeoutInt := int(stopTimeout.Seconds())
+	stopTimeoutInt := int(stopTimeout.Seconds()) // Get integer seconds for StopOptions Timeout
 	if err := m.dockerClient.ContainerStop(stopCtx, state.ContainerID, container.StopOptions{Timeout: &stopTimeoutInt}); err != nil {
-		// Log the error but proceed to attempt removal anyway
-		m.logger.Error("Failed to stop container (proceeding with removal attempt)", "sandboxID", sandboxID, "containerID", state.ContainerID, "error", err)
-		// Check if the error indicates the container is already stopped or gone
-		if !client.IsErrNotFound(err) && !strings.Contains(err.Error(), "is already stopped") {
-			// If it's a different error, maybe return it or log more severely
+		// Log the error but proceed to attempt removal anyway, unless it's context deadline exceeded
+		// which might indicate a bigger issue or unresponsive Docker daemon.
+		if !errors.Is(err, context.DeadlineExceeded) {
+				m.logger.Error("Failed to stop container (proceeding with removal attempt)", "sandboxID", sandboxID, "containerID", state.ContainerID, "error", err)
+				// Check if the error indicates the container is already stopped or gone - log less severely if so.
+				if client.IsErrNotFound(err) || strings.Contains(err.Error(), "is already stopped") {
+					m.logger.Info("Container already stopped or not found during stop attempt", "containerID", state.ContainerID)
+				}
+		} else {
+			// Context deadline exceeded during stop - log potentially more severely?
+			m.logger.Error("Context deadline exceeded while stopping container (proceeding with removal attempt)", "sandboxID", sandboxID, "containerID", state.ContainerID, "error", err)
 		}
+	} else {
+		m.logger.Debug("Container stopped successfully", "containerID", state.ContainerID)
 	}
 
+
 	// 2. Remove the container
-	removeCtx, removeCancel := context.WithTimeout(ctx, 15*time.Second)
+	// Use a separate context for removal, potentially longer timeout.
+	// Use background context in case parent ctx was cancelled during stop.
+	removeCtx, removeCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer removeCancel()
 
 	m.logger.Debug("Removing container", "containerID", state.ContainerID)
-	if err := m.dockerClient.ContainerRemove(removeCtx, state.ContainerID, container.RemoveOptions{Force: true /* Force removal even if running */, RemoveVolumes: true /* Remove associated anonymous volumes */}); err != nil {
-		// Log the error, but since we're deleting, maybe it's acceptable if it's already gone
+	removeOpts := container.RemoveOptions{
+		Force:         true, // Force removal even if running (in case stop failed)
+		RemoveVolumes: true, // Remove associated anonymous volumes
+	}
+	if err := m.dockerClient.ContainerRemove(removeCtx, state.ContainerID, removeOpts); err != nil {
+		// Log the error, but since we're deleting, maybe it's acceptable if it's already gone.
 		m.logger.Error("Failed to remove container", "sandboxID", sandboxID, "containerID", state.ContainerID, "error", err)
-		// If the container wasn't found, it's effectively deleted from Docker's perspective
+		// If the container wasn't found, it's effectively deleted from Docker's perspective. Don't return error in this case.
 		if !client.IsErrNotFound(err) {
+			// Return error only if it's not a "not found" error.
 			return fmt.Errorf("failed to remove container %s: %w", state.ContainerID, err)
 		}
+		m.logger.Info("Container already removed or not found during remove attempt", "containerID", state.ContainerID)
+	} else {
+		m.logger.Debug("Container removed successfully", "containerID", state.ContainerID)
 	}
 
-	delete(m.sandboxes, sandboxID)
-	// --- End Placeholder --- 
 
-	m.logger.Info("Sandbox deleted successfully", "sandboxID", sandboxID, "containerID", state.ContainerID)
+	// 3. Remove from internal tracking map
+	delete(m.sandboxes, sandboxID)
+
+	m.logger.Info("Sandbox deleted successfully", "sandboxID", sandboxID, "containerID", state.ContainerID) // Log original container ID for correlation
 	return nil
 }
 
@@ -484,13 +596,21 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 		// Don't return error to agent, just log it and continue
 		return nil
 	}
-
+	// ***** 添加这个日志块 *****
+	m.logger.Debug("Parsed internal observation struct",
+		"sandboxID", sandboxID,
+		"parsedActionID", obs.ActionID,
+		"parsedObservationType", obs.ObservationType,
+		"parsedTimestamp", obs.Timestamp,
+		// "parsedData", obs.Data, // 暂时注释掉Data，避免可能的复杂对象打印问题
+		"rawData", string(observationData)) // 再次打印原始数据以便对比
+	// **************************
 	// Log the received observation
-	m.logger.Debug("Received internal observation", "sandboxID", sandboxID, "actionID", obs.ActionID, "type", obs.Type)
+	m.logger.Debug("Received internal observation", "sandboxID", sandboxID, "actionID", obs.ActionID, "type", obs.ObservationType)
 
 	// Ensure actionID is present
 	if obs.ActionID == "" {
-		m.logger.Error("Received internal observation without action_id", "sandboxID", sandboxID, "type", obs.Type, "rawData", string(observationData))
+		m.logger.Error("Received internal observation without action_id", "sandboxID", sandboxID, "type", obs.ObservationType, "rawData", string(observationData))
 		// Cannot process further without actionID
 		return nil // Ignore observation without actionID
 	}
@@ -502,8 +622,8 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 	}
 
 	// Handle both 'result' and 'end' observation types to ensure proper completion
-	if obs.Type == "result" || obs.Type == "end" {
-		m.logger.Info(fmt.Sprintf("Received '%s' observation, sending 'end'", obs.Type), "sandboxID", sandboxID, "actionID", obs.ActionID)
+	if obs.ObservationType == "result" || obs.ObservationType == "end" {
+		m.logger.Info(fmt.Sprintf("Received '%s' observation, sending 'end'", obs.ObservationType), "sandboxID", sandboxID, "actionID", obs.ActionID)
 
 		// Extract exit code and error from the result data
 		var exitCode int = 0 // Default to success if parsing fails
@@ -522,7 +642,7 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 				errorMsg = errMsg
 			}
 		} else {
-			m.logger.Warn("Received observation with unexpected data format", "actionID", obs.ActionID, "type", obs.Type, "data", obs.Data)
+			m.logger.Warn("Received observation with unexpected data format", "actionID", obs.ActionID, "type", obs.ObservationType, "data", obs.Data)
 		}
 
 		// Always send the 'end' observation to ensure client knows the action is complete

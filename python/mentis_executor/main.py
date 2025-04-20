@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from fastapi import FastAPI, HTTPException, Response
 from IPython.core.interactiveshell import InteractiveShell
 from contextlib import redirect_stdout, redirect_stderr
@@ -7,16 +8,41 @@ import io
 import os
 import requests
 import logging
+import traceback # Import traceback
+from datetime import datetime, timezone # Added for timestamp
 
-from sandboxai.api.v1 import (
-    RunIPythonCellRequest,
-    RunIPythonCellResult,
-    RunShellCommandRequest,
-    RunShellCommandResult,
-)
+print("<<<<<< EXECUTOR CODE VERSION: TIMESTAMP_FIXED >>>>>>", flush=True)
+
+# Import Pydantic models from sandboxai library if possible,
+# otherwise define minimal ones here if needed for request validation/typing.
+# Assuming they are accessible via sandboxai.api.v1 as before
+try:
+    from sandboxai.api.v1 import (
+        RunIPythonCellRequest,
+        # RunIPythonCellResult, # Not used directly as response model anymore
+        RunShellCommandRequest,
+        # RunShellCommandResult, # Not used directly as response model anymore
+    )
+except ImportError:
+    # Define minimal Pydantic models if import fails (basic structure)
+    from pydantic import BaseModel, Field
+    from typing import Optional
+    logger.warning("Could not import Pydantic models from sandboxai.api.v1, using fallback definitions.")
+
+    class RunIPythonCellRequest(BaseModel):
+        code: str
+        split_output: Optional[bool] = False
+        action_id: Optional[str] = None
+
+    class RunShellCommandRequest(BaseModel):
+        command: str
+        split_output: Optional[bool] = False
+        action_id: Optional[str] = None
+
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
+# Ensure level is DEBUG to see the new logs
+logging.basicConfig(level=logging.DEBUG, # <-- Set level to DEBUG
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mentis-executor")
 
@@ -28,313 +54,317 @@ app = FastAPI(
 )
 
 # Initialize IPython shell
-ipy = InteractiveShell.instance()
-
+# Use a try-except block for robustness, especially in container environments
+try:
+    # Suppress unnecessary IPython warnings if possible during init
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Disable noisy startup messages if possible (might depend on IPython version)
+        ipy = InteractiveShell.instance(banner1='', exit_msg='')
+    logger.info("IPython InteractiveShell initialized successfully.")
+except Exception as ipy_init_err:
+    logger.error(f"Failed to initialize IPython InteractiveShell: {ipy_init_err}", exc_info=True)
+    ipy = None # Set ipy to None if initialization fails
 
 @app.get(
     "/healthz",
     summary="Check the health of the API",
-    response_model=None,
+    response_model=None, # No response body for simple health check
+    status_code=200,     # Explicitly set success status code
 )
-async def healthz():
-    return {"status": "OK"}
+def healthz():
+    # Optionally add checks here (e.g., is ipy initialized?)
+    if ipy is None:
+         # Return 503 Service Unavailable if IPython failed
+         # logger.warning("Health check failed: IPython shell not available.")
+         # raise HTTPException(status_code=503, detail="IPython shell not available")
+         pass # For now, consider agent healthy if FastAPI is running
+    return Response(status_code=200)
 
 
 @app.post(
     "/tools:run_ipython_cell",
-    response_model=RunIPythonCellResult,
     summary="Invoke a cell in a stateful IPython (Jupyter) kernel",
+    response_description="NDJSON stream of observations (stdout, stderr, result)",
+    status_code=200, # Return 200 OK immediately
 )
-async def run_ipython_cell(request: RunIPythonCellRequest):
+def run_ipython_cell(request: RunIPythonCellRequest):
     """
-    Execute code in an IPython kernel and return the results.
-
-    Args:
-        request: The cell execution request containing the code to run
-
-    Returns:
-        The execution results including output, stdout, and stderr
+    Execute code in an IPython kernel. Observations are pushed asynchronously
+    to the RUNTIME_OBSERVATION_URL.
+    Returns an immediate 200 OK if the request is accepted.
     """
-    # 从请求对象获取 action_id
-    action_id = getattr(request, 'action_id', None)
-    
-    # 尝试从请求中获取 action_id (多种可能的方法)
-    if action_id is None:
-        # 尝试作为属性获取
-        try:
-            if hasattr(request, 'dict'):
-                if callable(request.dict):
-                    # 如果 dict 是一个方法
-                    req_dict = request.dict()
-                    if isinstance(req_dict, dict):
-                        action_id = req_dict.get('action_id')
-                else:
-                    # 如果 dict 是一个属性
-                    if isinstance(request.dict, dict):
-                        action_id = request.dict.get('action_id')
-        except Exception as e:
-            logger.warning(f"[AGENT] Error extracting action_id: {str(e)}")
-            
-        # 还可以尝试从请求体获取
-        try:
-            if hasattr(request, 'body'):
-                if isinstance(request.body, dict):
-                    action_id = request.body.get('action_id')
-        except Exception:
-            pass
-    
-    # 输出日志用于调试
-    logger.info(f"[AGENT] Extracted action_id: {action_id}")
-    
+    if ipy is None:
+        logger.error("IPython shell not initialized, cannot run cell.")
+        raise HTTPException(status_code=503, detail="IPython shell not available")
+
+    # --- Use correct action_id from request ---
+    action_id = request.action_id
+    # ---
+
     sandbox_id = os.environ.get('SANDBOX_ID')
     runtime_observation_url = os.environ.get('RUNTIME_OBSERVATION_URL')
-    
-    logger.info(f"[AGENT] Running IPython cell with action_id: {action_id}, Runtime URL: {runtime_observation_url}")
-    
+
+    logger.info(f"[AGENT] Received IPython cell request. ActionID: {action_id}, SandboxID: {sandbox_id}")
+
+    if not runtime_observation_url:
+        logger.error("[AGENT] RUNTIME_OBSERVATION_URL environment variable not set. Cannot send observations.")
+        # Optionally raise error if this is critical
+    if action_id is None:
+         logger.warning("[AGENT] action_id not found in request. Observations cannot be correlated.")
+         # Optionally raise error if this is critical
+
+    exit_code = 0
+    error_message = None
+    tb_lines = []
+
     try:
-        if getattr(request, 'split_output', False):
-            # Capture stdout and stderr separately
-            stdout_buf = io.StringIO()
-            stderr_buf = io.StringIO()
+        # Capture stdout and stderr separately
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
 
-            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                ipy.run_cell(request.code)
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            exec_result = ipy.run_cell(request.code, store_history=True)
 
-            stdout = stdout_buf.getvalue()
-            stderr = stderr_buf.getvalue()
-            
-            logger.info(f"[AGENT] IPython execution complete. stdout: {len(stdout)} chars, stderr: {len(stderr)} chars")
-            
-            # Send observations to runtime if URL is provided
-            if runtime_observation_url and action_id:
-                logger.info(f"[AGENT] Sending IPython output observations to {runtime_observation_url}")
-                if stdout:
-                    send_observation(runtime_observation_url, {
-                        "type": "stream",
-                        "action_id": action_id,
-                        "stream": "stdout",
-                        "line": stdout
-                    })
-                if stderr:
-                    send_observation(runtime_observation_url, {
-                        "type": "stream",
-                        "action_id": action_id,
-                        "stream": "stderr",
-                        "line": stderr
-                    })
-                # Always send result observation
-                logger.info(f"[AGENT] Sending IPython result observation")
+        stdout = stdout_buf.getvalue()
+        stderr = stderr_buf.getvalue()
+
+        logger.info(f"[AGENT] IPython execution finished. ActionID: {action_id}. Success: {exec_result.success}. Stdout: {len(stdout)} chars. Stderr: {len(stderr)} chars.")
+
+        # --- Send Observations ---
+        if runtime_observation_url and action_id:
+            # Send stdout if any
+            if stdout:
                 send_observation(runtime_observation_url, {
-                    "type": "result",
+                    "observation_type": "stream", # Correct key
                     "action_id": action_id,
-                    "exit_code": 0
+                    "stream": "stdout",
+                    "line": stdout
+                })
+
+            # Send stderr if any
+            if stderr:
+                 send_observation(runtime_observation_url, {
+                    "observation_type": "stream", # Correct key
+                    "action_id": action_id,
+                    "stream": "stderr",
+                    "line": stderr
+                })
+
+            # Send result observation
+            if exec_result.error_before_exec or exec_result.error_in_exec:
+                exit_code = 1
+                try:
+                    ex_type, ex_value, tb = ipy.InteractiveTB.get_exc_info(exec_result.error_in_exec or exec_result.error_before_exec)
+                    stb = ipy.InteractiveTB.structured_traceback(ex_type, ex_value, tb)
+                    tb_lines = ipy.InteractiveTB.format_structured_traceback(stb)
+                    error_message = "".join(tb_lines)
+                    logger.error(f"[AGENT] IPython execution error captured. ActionID: {action_id}\n{error_message}")
+                except Exception as format_err:
+                    logger.error(f"[AGENT] Failed to format IPython traceback. ActionID: {action_id}. Error: {format_err}")
+                    error_message = str(exec_result.error_in_exec or exec_result.error_before_exec) or "Unknown IPython execution error"
+
+                send_observation(runtime_observation_url, {
+                    "observation_type": "result", # Correct key
+                    "action_id": action_id,
+                    "exit_code": exit_code,
+                    "error": error_message
                 })
             else:
-                logger.warning(f"[AGENT] Cannot send observations: URL={runtime_observation_url}, action_id={action_id}")
-
-            return RunIPythonCellResult(
-                stdout=stdout, stderr=stderr
-            )
+                exit_code = 0
+                send_observation(runtime_observation_url, {
+                    "observation_type": "result", # Correct key
+                    "action_id": action_id,
+                    "exit_code": exit_code
+                    # Include exec_result.result if needed
+                    # "result_data": exec_result.result # This can be complex
+                })
         else:
-            # Capture combined output
-            output_buf = io.StringIO()
-            with redirect_stdout(output_buf), redirect_stderr(output_buf):
-                ipy.run_cell(request.code)
+             logger.warning(f"[AGENT] Cannot send observations: URL={runtime_observation_url}, action_id={action_id}")
 
-            output = output_buf.getvalue()
-            
-            logger.info(f"[AGENT] IPython execution complete. Combined output: {len(output)} chars")
-            
-            # Send observations to runtime if URL is provided
-            if runtime_observation_url and action_id:
-                logger.info(f"[AGENT] Sending IPython output observations to {runtime_observation_url}")
-                if output:
-                    send_observation(runtime_observation_url, {
-                        "type": "stream",
-                        "action_id": action_id,
-                        "stream": "stdout",
-                        "line": output
-                    })
-                # Always send result observation
-                logger.info(f"[AGENT] Sending IPython result observation")
-                send_observation(runtime_observation_url, {
-                    "type": "result",
-                    "action_id": action_id,
-                    "exit_code": 0
-                })
-            else:
-                logger.warning(f"[AGENT] Cannot send observations: URL={runtime_observation_url}, action_id={action_id}")
-
-            return RunIPythonCellResult(output=output)
+        return Response(status_code=200)
 
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"[AGENT] IPython cell execution error: {error_msg}")
-        
-        # Send error observation if URL is provided
+        exit_code = -1
+        error_msg = f"Internal agent error during IPython execution: {e}"
+        tb_str = traceback.format_exc()
+        logger.error(f"[AGENT] {error_msg}. ActionID: {action_id}\n{tb_str}")
+
         if runtime_observation_url and action_id:
             send_observation(runtime_observation_url, {
-                "type": "stream",
+                "observation_type": "result", # Correct key
                 "action_id": action_id,
-                "stream": "stderr",
-                "line": error_msg
-            })
-            send_observation(runtime_observation_url, {
-                "type": "result",
-                "action_id": action_id,
-                "exit_code": 1,
+                "exit_code": exit_code,
                 "error": error_msg
             })
-            
         raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post(
     "/tools:run_shell_command",
-    # response_model=RunShellCommandResult, # Keep commented out
-    summary="Invoke a shell command and return NDJSON.",
+    summary="Invoke a shell command.",
+    response_description="NDJSON stream of observations (stdout, stderr, result)",
+    status_code=200, # Return 200 OK immediately
 )
-async def run_shell_command(request: RunShellCommandRequest):
+def run_shell_command(request: RunShellCommandRequest):
     """
-    Execute a shell command, capture output, and return results as NDJSON.
-    NOTE: This does not stream in real-time from the agent.
+    Execute a shell command. Observations are pushed asynchronously
+    to the RUNTIME_OBSERVATION_URL.
+    Returns an immediate 200 OK if the request is accepted.
     """
-    logger.info(f"[AGENT] Running command synchronously: {request.command}")
-    ndjson_lines = []
-    error_output = None
-    exit_code = -1
-    
-    action_id = request.action_id if hasattr(request, 'action_id') else None
+    # --- Use correct action_id from request ---
+    action_id = request.action_id
+     # ---
+
+    sandbox_id = os.environ.get('SANDBOX_ID')
     runtime_observation_url = os.environ.get('RUNTIME_OBSERVATION_URL')
 
+    logger.info(f"[AGENT] Received shell command request: '{request.command}'. ActionID: {action_id}, SandboxID: {sandbox_id}")
+
+    if not runtime_observation_url:
+        logger.error("[AGENT] RUNTIME_OBSERVATION_URL environment variable not set. Cannot send observations.")
+    if action_id is None:
+         logger.warning("[AGENT] action_id not found in request. Observations cannot be correlated.")
+
+    exit_code = -1
+    error_output = None
+
     try:
-        # Run the command synchronously, capturing stdout and stderr
-        result = subprocess.run(
+        process = subprocess.Popen(
             request.command,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True, # Decode output as text
-            check=False # Don't raise exception on non-zero exit code
+            text=True,
         )
-        exit_code = result.returncode
-        logger.info(f"[AGENT] Command finished with exit code: {exit_code}")
 
-        # Add stdout lines to NDJSON
-        if result.stdout:
-            # Split stdout into lines correctly
-            stdout_lines = result.stdout.strip().split('\n') if result.stdout else []
-            for line in stdout_lines:
-                if line: # Avoid empty lines
-                    payload = json.dumps({
-                        "type": "stream",
-                        "stream": "stdout",
-                        "line": line,
-                    })
-                    ndjson_lines.append(payload)
-                    logger.info(f"[AGENT] Adding stdout line: {payload}")
-                    
-                    # Send observation to runtime if URL is provided
-                    if runtime_observation_url and action_id:
+        stdout, stderr = process.communicate()
+        exit_code = process.returncode
+
+        logger.info(f"[AGENT] Shell command finished. ActionID: {action_id}. ExitCode: {exit_code}. Stdout: {len(stdout)} chars. Stderr: {len(stderr)} chars.")
+
+        # --- Send Observations ---
+        if runtime_observation_url and action_id:
+            # Send stdout lines
+            if stdout:
+                stdout_lines = stdout.rstrip('\n').split('\n')
+                for line in stdout_lines:
+                    if line:
                         send_observation(runtime_observation_url, {
-                            "type": "stream",
+                            "observation_type": "stream", # Correct key
                             "action_id": action_id,
                             "stream": "stdout",
                             "line": line
                         })
 
-        # Add stderr lines to NDJSON
-        if result.stderr:
-            # Split stderr into lines correctly
-            stderr_lines = result.stderr.strip().split('\n') if result.stderr else []
-            for line in stderr_lines:
-                if line: # Avoid empty lines
-                    payload = json.dumps({
-                        "type": "stream",
-                        "stream": "stderr",
-                        "line": line,
-                    })
-                    ndjson_lines.append(payload)
-                    logger.info(f"[AGENT] Adding stderr line: {payload}")
-                    
-                    # Send observation to runtime if URL is provided
-                    if runtime_observation_url and action_id:
-                        send_observation(runtime_observation_url, {
-                            "type": "stream",
+            # Send stderr lines
+            if stderr:
+                stderr_lines = stderr.rstrip('\n').split('\n')
+                if exit_code != 0:
+                    error_output = stderr.strip()
+
+                for line in stderr_lines:
+                    if line:
+                         send_observation(runtime_observation_url, {
+                            "observation_type": "stream", # Correct key
                             "action_id": action_id,
                             "stream": "stderr",
                             "line": line
                         })
 
-        # If exit code was non-zero, capture stderr as the error
-        if exit_code != 0 and result.stderr:
-            error_output = result.stderr.strip()
+            # Send final result observation
+            send_observation(runtime_observation_url, {
+                "observation_type": "result", # Correct key
+                "action_id": action_id,
+                "exit_code": exit_code,
+                "error": error_output,
+            })
+        else:
+             logger.warning(f"[AGENT] Cannot send observations: URL={runtime_observation_url}, action_id={action_id}")
+
+        return Response(status_code=200)
 
     except Exception as e:
-        logger.error(f"[AGENT] Exception during command execution: {e}")
-        error_output = f"Agent failed to execute command: {e}"
-        
-        # Send error observation to runtime if URL is provided
+        exit_code = -1
+        error_msg = f"Internal agent error during shell execution: {e}"
+        tb_str = traceback.format_exc()
+        logger.error(f"[AGENT] {error_msg}. ActionID: {action_id}\n{tb_str}")
+
         if runtime_observation_url and action_id:
-            send_observation(runtime_observation_url, {
-                "type": "stream",
+             send_observation(runtime_observation_url, {
+                "observation_type": "result", # Correct key
                 "action_id": action_id,
-                "stream": "stderr",
-                "line": str(e)
+                "exit_code": exit_code,
+                "error": error_msg
             })
 
-    # Add the final result line
-    result_payload = json.dumps({
-        "type": "result",
-        "exit_code": exit_code,
-        "error": error_output,
-    })
-    ndjson_lines.append(result_payload)
-    logger.info(f"[AGENT] Adding final result: {result_payload}")
-    
-    # Send result observation to runtime if URL is provided
-    if runtime_observation_url and action_id:
-        send_observation(runtime_observation_url, {
-            "type": "result",
-            "action_id": action_id,
-            "exit_code": exit_code,
-            "error": error_output
-        })
-
-    # Join all NDJSON lines with newline characters
-    ndjson_body = "\n".join(ndjson_lines) + "\n" # Ensure trailing newline
-
-    logger.info("[AGENT] Returning complete NDJSON response with media_type='application/x-ndjson'")
-    # 确保content_type正确，且返回的是字符串而不是bytes
-    return Response(content=ndjson_body, media_type="application/x-ndjson", headers={"Content-Type": "application/x-ndjson"})
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
-def send_observation(url, data):
+def send_observation(url: str, data: dict):
     """
-    Send observation data to the runtime service.
-    
+    Send observation data to the runtime service. Logs errors.
     Args:
-        url: The URL to send the observation to
-        data: The observation data to send
+        url: The URL to send the observation to.
+        data: The observation data dictionary to send as JSON.
+            Must include "observation_type" and "action_id".
     """
+    if not url:
+        # Log once if URL is missing? Or rely on caller's check?
+        # logger.error("[AGENT] send_observation called with no URL.")
+        return # Cannot send without URL
+
+    action_id = data.get("action_id", "UNKNOWN") # Get action_id for logging
+    obs_type = data.get("observation_type", "UNKNOWN") # Get type for logging
+
+    # --- 确保添加 Timestamp ---
+    if "timestamp" not in data:
+        data["timestamp"] = datetime.now(timezone.utc).isoformat()
+    # ---
+
+    # --- 添加详细的 Debug 日志 (包含 action_id 和 observation_type) ---
+    try:
+        # 使用 ensure_ascii=False 以便日志中能正确显示非 ASCII 字符
+        data_str = json.dumps(data, ensure_ascii=False)
+    except Exception as dump_err:
+        # 如果数据无法序列化为 JSON（理论上不应发生），记录错误
+        logger.error(f"[AGENT SENDING] Failed to dump observation data to JSON string. ActionID: {action_id}, Type: {obs_type}, Error: {dump_err}")
+        data_str = f"RAW_DATA_ERROR: {data}" # 提供原始数据快照
+    # 打印即将发送的完整数据
+    logger.debug(f"[AGENT SENDING] URL: {url}, ActionID: {action_id}, Type: {obs_type}, Data: {data_str}")
+    # ---
+
     try:
         response = requests.post(
             url,
-            json=data,
-            headers={"Content-Type": "application/json"},
-            timeout=5
+            json=data, # requests 会自动设置 Content-Type: application/json
+            headers={"Content-Type": "application/json"}, # 明确设置以防万一
+            timeout=10 # 设置请求超时
         )
-        if response.status_code >= 400:
-            logger.warning(f"[AGENT] Failed to send observation to runtime: {response.status_code} {response.text}")
-    except Exception as e:
-        logger.warning(f"[AGENT] Exception sending observation to runtime: {e}")
+        response.raise_for_status() # 对 4xx/5xx 状态码抛出异常
+        # 发送成功后可以只记录 Info 或 Debug 级别的日志
+        logger.debug(f"[AGENT] Observation sent successfully. ActionID: {action_id}, Type: {obs_type}, Status: {response.status_code}")
 
+    except requests.exceptions.Timeout:
+        logger.warning(f"[AGENT] Timeout sending observation to runtime. ActionID: {action_id}, Type: {obs_type}, URL: {url}")
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"[AGENT] Failed to send observation to runtime. ActionID: {action_id}, Type: {obs_type}, URL: {url}, Error: {e}")
+    except Exception as e:
+        # 捕获其他潜在错误
+         logger.error(f"[AGENT] Unexpected error in send_observation. ActionID: {action_id}, Type: {obs_type}, Error: {e}", exc_info=True)
 
 if __name__ == "__main__":
     import uvicorn
-    
-    port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "0.0.0.0")
-    
-    logger.info(f"[AGENT] Starting Mentis Executor on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+
+    # Use environment variables for configuration or defaults
+    port = int(os.environ.get("MENTIS_EXECUTOR_PORT", 8000)) # Use a more specific env var name
+    host = os.environ.get("MENTIS_EXECUTOR_HOST", "0.0.0.0") # Use a more specific env var name
+    log_level = os.environ.get("MENTIS_EXECUTOR_LOG_LEVEL", "debug").lower() # Allow configuring log level
+
+    # Reconfigure logging based on environment variable
+    logging.basicConfig(level=log_level.upper(), # Set level based on env var
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    logger.info(f"[AGENT] Starting Mentis Executor on {host}:{port} with log level {log_level}")
+    uvicorn.run(app, host=host, port=port, log_level=log_level) # Pass log_level to uvicorn

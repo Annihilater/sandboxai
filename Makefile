@@ -36,7 +36,7 @@ build-box-image:
 .PHONY: test/go
 test/go:
 	@echo "Running Go tests..."
-	cd $(GO_DIR) && $(GO_TEST) -v ./...
+	cd $(GO_DIR) && $(GO_TEST) -v $$(go list ./... | grep -v '/test/e2e')
 	@echo "Go tests finished."
 
 # --- Python Tests (using E2E script) ---

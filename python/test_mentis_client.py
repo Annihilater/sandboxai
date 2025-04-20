@@ -92,7 +92,7 @@ def sandbox_session():
         if box:
             print(f"\n[Fixture Teardown] Deleting sandbox {box.sandbox_id}...")
             try:
-                # disconnect_stream is called within delete()
+                # Wait for the disconnect callback to be triggered
                 box.delete()
             except Exception as e:
                 print(f"Error during sandbox deletion in teardown: {e}")

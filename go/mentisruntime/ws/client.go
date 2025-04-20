@@ -106,60 +106,41 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
+			// Set write deadline before attempting to write
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// The hub closed the channel.
-				c.logger.Info("Hub closed the send channel, closing connection")
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
+				// The hub closed the channel. Send a close message.
+				c.logger.Info("Hub closed the send channel, sending close message")
+				// Best effort to send close frame, ignore error
+				_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+				return // Exit goroutine
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
+			// Write the message as a single, distinct WebSocket text message.
+			// Removed the loop that aggregated multiple messages into one frame.
+			err := c.conn.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
-				c.logger.Error("Failed to get next writer", "error", err)
-				return
-			}
-			_, err = w.Write(message)
-			if err != nil {
-				c.logger.Error("Failed to write message to websocket", "error", err)
-				// Attempt to close the writer even if write failed
-				w.Close()
-				return
-			}
-
-			// Add queued chat messages to the current websocket message.
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				_, err = w.Write(newline) // Add newline separator between messages if needed
-				if err != nil {
-					c.logger.Error("Failed to write newline separator", "error", err)
-					// Attempt to close the writer even if write failed
-					w.Close()
-					return
+				// Log error and assume connection is broken, exit goroutine.
+				// readPump will handle unregistering the client.
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+					c.logger.Error("Failed to write message to websocket", "error", err)
+				} else {
+					c.logger.Info("Failed to write message, connection likely closed", "error", err)
 				}
-				msgToSend := <-c.send
-				_, err = w.Write(msgToSend)
-				if err != nil {
-					c.logger.Error("Failed to write queued message to websocket", "error", err)
-					// Attempt to close the writer even if write failed
-					w.Close()
-					return
-				}
-			}
-
-			if err := w.Close(); err != nil {
-				c.logger.Error("Failed to close writer", "error", err)
-				return
+				return // Exit goroutine
 			}
 			c.logger.Debug("Message sent to client", "messageSize", len(message))
 
 		case <-ticker.C:
-			c.logger.Debug("Sending Ping")
+			// Send ping message
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				// Log error and assume connection is broken, exit goroutine.
+				// readPump will handle unregistering the client.
 				c.logger.Error("Failed to write ping message", "error", err)
-				return
+				return // Exit goroutine
 			}
+			c.logger.Debug("Sending Ping")
 		}
 	}
 }

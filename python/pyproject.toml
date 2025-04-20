@@ -3,8 +3,8 @@ requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sandboxai-client"
-version = "0.0.2"
+name = "mentis-client"
+version = "0.0.1"
 description = "Secure sandboxes for AI agents and LLMs."
 
 requires-python = ">=3.10"
@@ -30,9 +30,9 @@ examples = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/substratusai/sandboxai"
-Repository = "https://github.com/substratusai/sandboxai.git"
-Documentation = "https://github.com/substratusai/sandboxai"
+Homepage = "https://github.com/foreveryh/sandboxai"
+Repository = "https://github.com/foreveryh/sandboxai.git"
+Documentation = "https://github.com/foreveryh/sandboxai"
 
 [project.optional-dependencies]
 examples = [

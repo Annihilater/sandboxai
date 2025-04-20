@@ -39,7 +39,8 @@ type BroadcastMessage struct {
 
 func NewHub(logger *slog.Logger) *Hub {
 	return &Hub{
-		broadcast:            make(chan *BroadcastMessage),
+		// Increase buffer size, e.g., to 256 (adjust if needed)
+		broadcast:            make(chan *BroadcastMessage, 256), // <--- 修改这里
 		register:             make(chan *Client),
 		unregister:           make(chan *Client),
 		clients:              make(map[*Client]bool),

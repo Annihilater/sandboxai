@@ -594,6 +594,48 @@ wheels = [
 ]
 
 [[package]]
+name = "mentis-client"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+examples = [
+    { name = "swarm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+examples = [
+    { name = "swarm" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "swarm", marker = "extra == 'examples'", git = "https://github.com/openai/swarm.git" },
+    { name = "websockets", specifier = ">=15.0.1" },
+]
+provides-extras = ["examples"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.4" },
+    { name = "ruff", specifier = ">=0.9.3" },
+]
+examples = [{ name = "swarm", git = "https://github.com/openai/swarm.git" }]
+
+[[package]]
 name = "multidict"
 version = "6.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1083,48 +1125,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/01/65cadb59bf8d4fbe33d1a750103e6883d9ef302f60c28b73b773092fbde5/ruff-0.9.3-py3-none-win_amd64.whl", hash = "sha256:040ceb7f20791dfa0e78b4230ee9dce23da3b64dd5848e40e3bf3ab76468dcf4", size = 10821444 },
     { url = "https://files.pythonhosted.org/packages/69/cb/b3fe58a136a27d981911cba2f18e4b29f15010623b79f0f2510fd0d31fd3/ruff-0.9.3-py3-none-win_arm64.whl", hash = "sha256:800d773f6d4d33b0a3c60e2c6ae8f4c202ea2de056365acfa519aa48acf28e0b", size = 10038168 },
 ]
-
-[[package]]
-name = "sandboxai-client"
-version = "0.0.2"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "requests" },
-    { name = "websockets" },
-]
-
-[package.optional-dependencies]
-examples = [
-    { name = "swarm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-examples = [
-    { name = "swarm" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "pydantic" },
-    { name = "requests" },
-    { name = "swarm", marker = "extra == 'examples'", git = "https://github.com/openai/swarm.git" },
-    { name = "websockets", specifier = ">=15.0.1" },
-]
-provides-extras = ["examples"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.3.4" },
-    { name = "ruff", specifier = ">=0.9.3" },
-]
-examples = [{ name = "swarm", git = "https://github.com/openai/swarm.git" }]
 
 [[package]]
 name = "shellingham"

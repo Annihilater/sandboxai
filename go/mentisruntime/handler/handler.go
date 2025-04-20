@@ -88,27 +88,30 @@ func (h *APIHandler) PostIPythonCellHandler(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(map[string]string{"action_id": actionID})
 }
 
-// InternalObservationHandler handles observation posts from the agent inside the sandbox.
 func (h *APIHandler) InternalObservationHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	sandboxID := vars["sandbox_id"]
+	vars := mux.Vars(r) // Uses gorilla/mux as per your provided code
+	sandboxID := vars["sandbox_id"] // Correct key for mux
 
 	if sandboxID == "" {
 		http.Error(w, "Missing sandbox_id in path", http.StatusBadRequest)
 		return
 	}
 
+	// Read the raw body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.logger.Error("Failed to read internal observation body", "sandboxID", sandboxID, "error", err)
 		http.Error(w, "Failed to read request body: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer r.Body.Close()
+	defer r.Body.Close() // Ensure body is closed
 
-	// Pass the raw bytes to the manager/hub for processing and broadcasting
-	// The manager or hub will be responsible for potentially unmarshalling
-	// if needed, or just broadcasting the raw message.
+	// ******** 添加的日志行 ********
+	// Log the raw body received from the agent BEFORE passing it to the manager
+	h.logger.Debug("Received raw internal observation body", "sandboxID", sandboxID, "body", string(bodyBytes))
+	// ***************************
+
+	// Pass the raw bytes to the manager for processing and broadcasting
 	err = h.manager.ReceiveInternalObservation(sandboxID, bodyBytes)
 	if err != nil {
 		h.logger.Error("Failed to process internal observation", "sandboxID", sandboxID, "error", err)
@@ -117,7 +120,9 @@ func (h *APIHandler) InternalObservationHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	w.WriteHeader(http.StatusOK) // 200 OK for successful receipt
+	// Respond with 200 OK to acknowledge successful receipt and processing attempt.
+	// Agent doesn't need to wait for broadcasting.
+	w.WriteHeader(http.StatusOK)
 }
 
 // CreateSandboxHandler handles requests to create a new sandbox.
