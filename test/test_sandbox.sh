@@ -1,7 +1,4 @@
 #!/bin/bash
-
-# Script to run a comprehensive test suite against a MentisSandbox instance.
-
 # --- Configuration ---
 BASE_URL="http://127.0.0.1:5266"
 # Prompt for the Sandbox ID
@@ -16,7 +13,7 @@ fi
 echo "--- Starting Test Suite for Sandbox ID: $SANDBOX_ID ---"
 echo "--- Base URL: $BASE_URL ---"
 echo "--- Remember to monitor the WebSocket stream in another terminal: ---"
-echo "--- websocat ws://127.0.0.1:5266/sandboxes/$SANDBOX_ID/stream ---"
+echo "--- websocat ws://127.0.0.1:5266/v1/sandboxes/$SANDBOX_ID/stream ---"
 echo ""
 sleep 3 # Give user time to read
 
@@ -27,7 +24,7 @@ run_test() {
   local description=$2
   local endpoint=$3
   local payload=$4
-  local url="${BASE_URL}/sandboxes/${SANDBOX_ID}/${endpoint}"
+  local url="${BASE_URL}/v1/sandboxes/${SANDBOX_ID}/${endpoint}"
 
   echo "--- Test $test_num: $description ---"
   echo "Endpoint: $url"

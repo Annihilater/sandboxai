@@ -78,20 +78,26 @@ func main() {
  
  	// --- Router --- 
  	r := mux.NewRouter()
-	r.HandleFunc("/sandboxes", apiHandler.CreateSandboxHandler).Methods("POST")
-	r.HandleFunc("/sandboxes/{sandbox_id}", apiHandler.DeleteSandboxHandler).Methods("DELETE")
- 	r.HandleFunc("/sandboxes/{sandbox_id}/shell", apiHandler.PostShellCommandHandler).Methods("POST")
- 	r.HandleFunc("/sandboxes/{sandbox_id}/ipython", apiHandler.PostIPythonCellHandler).Methods("POST")
 
-	// WebSocket Route
-	r.HandleFunc("/sandboxes/{sandbox_id}/stream", func(w http.ResponseWriter, r *http.Request) {
+	// Health Check Route
+	r.HandleFunc("/v1/healthz", handler.HealthCheckHandler).Methods("GET")
+
+	// Existing API Routes (assuming they should be under /v1 prefix)
+	apiV1 := r.PathPrefix("/v1").Subrouter()
+	apiV1.HandleFunc("/sandboxes", apiHandler.CreateSandboxHandler).Methods("POST")
+	apiV1.HandleFunc("/sandboxes/{sandbox_id}", apiHandler.DeleteSandboxHandler).Methods("DELETE")
+ 	apiV1.HandleFunc("/sandboxes/{sandbox_id}/shell", apiHandler.PostShellCommandHandler).Methods("POST")
+ 	apiV1.HandleFunc("/sandboxes/{sandbox_id}/ipython", apiHandler.PostIPythonCellHandler).Methods("POST")
+
+	// WebSocket Route (under /v1)
+	apiV1.HandleFunc("/sandboxes/{sandbox_id}/stream", func(w http.ResponseWriter, r *http.Request) {
 		// Assuming ServeWs signature: hub, checker, w, r, logger
 		// Pass sandboxManager as it implements the SandboxChecker interface
 		ws.ServeWs(hub, sandboxManager, w, r, logger)
 	})
 
-	// Internal Observation Route (Added to main router for Phase 1 simplicity)
-	r.HandleFunc("/internal/observations/{sandbox_id}", apiHandler.InternalObservationHandler).Methods("POST")
+	// Internal Observation Route (under /v1)
+	apiV1.HandleFunc("/internal/observations/{sandbox_id}", apiHandler.InternalObservationHandler).Methods("POST")
  
  	// --- Cleanup Logic (using separate, original client) --- 
  	if deleteOnShutdown {

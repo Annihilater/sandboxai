@@ -1,3 +1,15 @@
 /bin
 /.qodo
 /.pytest_cache
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.whl
+*.egg-info
+*.egg
+*.dist-info
+*.egg
+TODO_*.md
+*.txt

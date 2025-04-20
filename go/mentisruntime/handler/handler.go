@@ -164,5 +164,13 @@ func (h *APIHandler) DeleteSandboxHandler(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent) // 204 No Content
 }
 
-// TODO: Add handlers for CreateSandbox, DeleteSandbox etc.
-// These might interact directly with the manager or a Docker client wrapper.
+// HealthCheckHandler responds with a simple OK status.
+func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+
+// CreateSandbox creates a new sandbox with a random ID.
+// It configures and starts a Docker container with the agent inside.

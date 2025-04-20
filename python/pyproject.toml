@@ -11,8 +11,10 @@ requires-python = ">=3.10"
 dynamic = ["readme"]
 
 dependencies = [
+    "httpx>=0.28.1",
     "pydantic",
     "requests",
+    "websockets>=15.0.1",
 ]
 
 [tool.setuptools.dynamic]

@@ -296,7 +296,7 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context /* options */) (strin
 	if runtimePort == "" {
 		runtimePort = "5266" // Default port used in main.go
 	}
-	internalObservationURL := fmt.Sprintf("http://%s:%s/internal/observations/%s", runtimeHost, runtimePort, sandboxID)
+	internalObservationURL := fmt.Sprintf("http://%s:%s/v1/internal/observations/%s", runtimeHost, runtimePort, sandboxID)
 
 	envVars := []string{
 		fmt.Sprintf("SANDBOX_ID=%s", sandboxID),
@@ -470,16 +470,19 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 		return nil // Don't return error to agent, just ignore
 	}
 
+	// Always broadcast the raw data first to ensure clients receive it
+	// regardless of parsing success or failure
+	if m.hub != nil {
+		m.logger.Debug("Broadcasting raw observation data", "sandboxID", sandboxID)
+		m.hub.SubmitBroadcast(sandboxID, observationData)
+	}
+
 	// Attempt to parse the incoming observation data
 	var obs Observation
 	if err := json.Unmarshal(observationData, &obs); err != nil {
 		m.logger.Error("Failed to unmarshal internal observation from agent", "error", err, "sandboxID", sandboxID, "rawData", string(observationData))
-		// Decide if we should broadcast raw data or an error message
-		// Broadcasting raw might break clients expecting JSON. Let's send an error observation.
-		// We need an actionID here... which we don't have directly. This is a flaw.
-		// For now, we can only log the error. We cannot reliably send an error observation without actionID.
-		// TODO: Agent MUST include action_id in all pushed observations.
-		return fmt.Errorf("failed to parse observation JSON: %w", err) // Return error to agent? Maybe not.
+		// Don't return error to agent, just log it and continue
+		return nil
 	}
 
 	// Log the received observation
@@ -498,30 +501,31 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 		m.hub.SubmitBroadcast(sandboxID, observationData)
 	}
 
-	// If this is a 'result' observation, also send the final 'end' observation
-	if obs.Type == "result" {
-		m.logger.Info("Received 'result' observation, sending 'end'", "sandboxID", sandboxID, "actionID", obs.ActionID)
+	// Handle both 'result' and 'end' observation types to ensure proper completion
+	if obs.Type == "result" || obs.Type == "end" {
+		m.logger.Info(fmt.Sprintf("Received '%s' observation, sending 'end'", obs.Type), "sandboxID", sandboxID, "actionID", obs.ActionID)
 
 		// Extract exit code and error from the result data
-		var exitCode int = -1 // Default if parsing fails
+		var exitCode int = 0 // Default to success if parsing fails
 		var errorMsg string
 		
-		// Attempt to parse the Data field based on expected structure for 'result'
+		// Attempt to parse the Data field based on expected structure
 		if dataMap, ok := obs.Data.(map[string]interface{}); ok {
 			if ec, ok := dataMap["exit_code"].(float64); ok { // JSON numbers are float64
 				exitCode = int(ec)
+			} else if ec, ok := dataMap["exit_code"].(int); ok { // Handle direct int case
+				exitCode = ec
 			} else {
-				m.logger.Warn("Could not parse 'exit_code' from result data", "actionID", obs.ActionID, "data", obs.Data)
+				m.logger.Warn("Could not parse 'exit_code' from data", "actionID", obs.ActionID, "data", obs.Data)
 			}
 			if errMsg, ok := dataMap["error"].(string); ok {
 				errorMsg = errMsg
 			}
 		} else {
-			m.logger.Warn("Received 'result' observation with unexpected data format", "actionID", obs.ActionID, "data", obs.Data)
-			errorMsg = "Result data format unexpected"
+			m.logger.Warn("Received observation with unexpected data format", "actionID", obs.ActionID, "type", obs.Type, "data", obs.Data)
 		}
 
-		// Send the 'end' observation
+		// Always send the 'end' observation to ensure client knows the action is complete
 		m.pushObservation(sandboxID, obs.ActionID, "end", EndObservationData{ExitCode: exitCode, Error: errorMsg})
 	}
 
