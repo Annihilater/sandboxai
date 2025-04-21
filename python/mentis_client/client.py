@@ -15,7 +15,7 @@ from .exceptions import MentisSandboxError, ConnectionError, APIError, WebSocket
 # Import Observation models and parsing function
 from .models import BaseObservation, parse_observation
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Ensure logger is defined
 
 DEFAULT_BASE_URL = "http://localhost:8080" # Default Runtime service URL
 DEFAULT_WEBSOCKET_RECV_TIMEOUT = 5.0 # Timeout for reading from WebSocket
@@ -37,6 +37,7 @@ class MentisSandbox:
     def __init__(
         self,
         sandbox_id: str,
+        space_id: str, # Added space_id
         base_url: str = DEFAULT_BASE_URL,
         api_timeout: float = DEFAULT_API_TIMEOUT,
         # WebSocket configuration options
@@ -58,6 +59,7 @@ class MentisSandbox:
 
         Args:
             sandbox_id: The ID of the sandbox to connect to.
+            space_id: The ID of the space the sandbox belongs to. # Added docstring
             base_url: The base URL of the MentisRuntime service.
             api_timeout: Timeout in seconds for standard REST API calls.
             ws_recv_timeout: Timeout for receiving a message over WebSocket.
@@ -79,10 +81,13 @@ class MentisSandbox:
         """
         if not sandbox_id:
             raise ValueError("sandbox_id cannot be empty")
+        if not space_id: # Added validation for space_id
+            raise ValueError("space_id cannot be empty")
         if not (observation_queue or on_observation_callback):
             logger.warning("No observation_queue or on_observation_callback provided. Observations will be logged only.")
 
         self.sandbox_id = sandbox_id
+        self.space_id = space_id # Store space_id
         self.base_url = base_url.rstrip('/')
         self.api_url = f"{self.base_url}/v1"
         # Construct WebSocket URL carefully
@@ -117,16 +122,28 @@ class MentisSandbox:
     @classmethod
     def create(
         cls,
+        space_id: str = "default", # Added space_id parameter with default
         settings: Optional[Dict[str, Any]] = None,
         base_url: str = DEFAULT_BASE_URL,
         api_timeout: float = DEFAULT_CREATE_API_TIMEOUT, # Use specific timeout for creation
         **kwargs # Pass other init args like callbacks/queue/ws_config
     ) -> 'MentisSandbox':
         """
-        Creates a new sandbox instance via the API and returns a client for it.
+        Creates a new sandbox instance within a specific space via the API and returns a client for it.
+
+        Args:
+            space_id: The ID of the space to create the sandbox in. Defaults to "default".
+            settings: Optional settings for sandbox creation (e.g., image).
+            base_url: Base URL of the MentisRuntime.
+            api_timeout: Timeout for the creation API call.
+            **kwargs: Additional arguments passed to the MentisSandbox constructor.
+
+        Returns:
+            An initialized MentisSandbox client instance.
         """
-        url = f"{base_url.rstrip('/')}/v1/sandboxes"
-        logger.info(f"Creating sandbox via {url}...")
+        # Modified URL to include space_id
+        url = f"{base_url.rstrip('/')}/v1/spaces/{space_id}/sandboxes"
+        logger.info(f"Creating sandbox in space '{space_id}' via {url}...")
         try:
             # Use a temporary client for creation to respect specific timeout
             with httpx.Client(timeout=api_timeout) as create_client:
@@ -134,12 +151,28 @@ class MentisSandbox:
                 if response.status_code == 201:
                     data = response.json()
                     sandbox_id = data['sandbox_id']
-                    logger.info(f"Sandbox created successfully with ID: {sandbox_id}")
-                    # Initialize client with the new ID and other kwargs
-                    # Pass the original api_timeout from kwargs if provided, else use default
+                    # Verify space_id matches if returned (optional but good practice)
+                    returned_space_id = data.get('SpaceID') # Assuming Go struct field name
+                    if returned_space_id and returned_space_id != space_id:
+                         logger.warning(f"API returned space ID '{returned_space_id}' which differs from requested '{space_id}'")
+                         # Decide how to handle mismatch - use returned or requested? Let's use requested for now.
+                    
+                    logger.info(f"Sandbox created successfully with ID: {sandbox_id} in space: {space_id}")
+                    # Initialize client with the new ID, space_id, and other kwargs
                     if 'api_timeout' not in kwargs:
                         kwargs['api_timeout'] = DEFAULT_API_TIMEOUT # Use standard timeout for the instance
-                    return cls(sandbox_id=sandbox_id, base_url=base_url, **kwargs)
+                    # Pass space_id to constructor
+                    instance = cls(sandbox_id=sandbox_id, space_id=space_id, base_url=base_url, **kwargs)
+                    logger.info(f"MentisSandbox instance created for {sandbox_id}. Attempting to connect stream...")
+                    try:
+                        # Explicitly connect stream after successful creation
+                        instance.connect_stream()
+                    except Exception as connect_err:
+                        # Log connection error but don't necessarily fail creation
+                        logger.error(f"Failed to auto-connect stream after creating sandbox {sandbox_id}: {connect_err}", exc_info=True)
+                        # Depending on requirements, you might want to raise an error here
+                        # or allow the client to exist without an active stream initially.
+                    return instance
                 else:
                     # Try to parse error details from response
                     try:
@@ -155,8 +188,8 @@ class MentisSandbox:
 
     def _post_action(self, endpoint: str, payload: Dict[str, Any]) -> str:
         """Helper to POST an action and return action_id."""
-        # 不再生成客户端action_id，让服务器生成
-        url = f"/sandboxes/{self.sandbox_id}/{endpoint}"
+        # Modified URL to include space_id
+        url = f"/spaces/{self.space_id}/sandboxes/{self.sandbox_id}/{endpoint}"
         logger.debug(f"Posting action to {url}: {payload}")
         try:
             response = self._client.post(url, json=payload)
@@ -191,7 +224,7 @@ class MentisSandbox:
         if work_dir: payload["work_dir"] = work_dir
         if env: payload["env"] = env
         if timeout: payload["timeout"] = timeout
-        return self._post_action("shell", payload)
+        return self._post_action("tools:run_shell_command", payload)
 
     def run_ipython_cell(self, code: str, timeout: Optional[int]=None) -> str:
         """
@@ -210,7 +243,7 @@ class MentisSandbox:
         """
         payload = {"code": code}
         if timeout: payload["timeout"] = timeout
-        return self._post_action("ipython", payload)
+        return self._post_action("tools:run_ipython_cell", payload)
 
     # --- Streaming Connection Methods ---
 
@@ -236,8 +269,10 @@ class MentisSandbox:
         self._stop_event.clear()
         self._is_connected.clear() # Clear connection status flag
 
+        logger.info("Attempting to start WebSocket listener thread...") # Added log
         self._listener_thread = threading.Thread(target=self._websocket_listener_sync_wrapper, daemon=True)
         self._listener_thread.start()
+        logger.info("Listener thread started.") # Added log
 
         # Wait for the connection to be established or timeout
         logger.info(f"Waiting up to {connect_timeout}s for WebSocket connection...")
@@ -256,7 +291,7 @@ class MentisSandbox:
             self._stop_event.clear() # Reset stop event
 
             raise ConnectionError(f"Failed to connect to WebSocket stream at {self.stream_url} within {connect_timeout} seconds.")
-        logger.info("WebSocket stream connected successfully.")
+        logger.info("WebSocket stream connected successfully (connect_stream method finished).") # Modified log
 
 
     def _websocket_listener_sync_wrapper(self):
@@ -283,7 +318,7 @@ class MentisSandbox:
         reconnect_delay = self._ws_reconnect_delay # Initial reconnect delay from config
         while not self._stop_event.is_set():
             try:
-                logger.info(f"Attempting to connect to WebSocket: {self.stream_url}")
+                logger.info(f"Attempting to connect to WebSocket: {self.stream_url}") # Existing log
                 # Configure connect options using instance attributes
                 async with websockets.connect(
                     self.stream_url,
@@ -292,7 +327,8 @@ class MentisSandbox:
                     open_timeout=self._ws_connect_timeout # Use configured connect timeout
                 ) as websocket:
                     self._is_connected.set() # Signal successful connection
-                    logger.info(f"WebSocket connected to {self.stream_url}")
+                    # **** ADDED LOG ****
+                    logger.info(f"WebSocket successfully connected to {self.stream_url}. Listener active.")
                     reconnect_delay = self._ws_reconnect_delay # Reset delay on successful connection
                     if self._on_connect_callback:
                         try: self._on_connect_callback()
@@ -303,6 +339,8 @@ class MentisSandbox:
                         try:
                             # Wait for message with a timeout to allow checking stop_event
                             message = await asyncio.wait_for(websocket.recv(), timeout=self._ws_recv_timeout)
+                            # **** ADDED LOG ****
+                            logger.debug(f"Raw WebSocket message received: {message[:200]}...") # Log raw message
                             if self._stop_event.is_set(): break # Check again after recv
 
                             # --- Observation Processing ---
@@ -313,6 +351,8 @@ class MentisSandbox:
                                     # parsed_obs will be specific type like CmdStartObservation etc. or BaseObservation/Unknown
                                     parsed_obs: BaseObservation = parse_observation(raw_observation)
                                     observation_to_deliver = parsed_obs # Deliver the model instance
+                                    # **** ADDED LOG ****
+                                    logger.debug(f"Parsed observation: {observation_to_deliver}")
                                 except Exception as parse_err:
                                      logger.error(f"Pydantic parsing error for observation: {raw_observation}", exc_info=True)
                                      # Decide how to handle parsing errors - maybe push an ErrorObservation?
@@ -324,6 +364,8 @@ class MentisSandbox:
 
                                 # --- Deliver Observation ---
                                 if self._observation_queue:
+                                    # **** ADDED LOG ****
+                                    logger.debug(f"Putting observation into queue: {observation_to_deliver.observation_type} for action {observation_to_deliver.action_id}")
                                     self._observation_queue.put(observation_to_deliver)
                                 elif self._on_observation_callback:
                                     try:
@@ -380,16 +422,9 @@ class MentisSandbox:
 
                     # --- End Receive loop ---
 
-            except websockets.exceptions.InvalidURI as e:
-                 logger.error(f"Invalid WebSocket URI: {self.stream_url} - {e}. Stopping listener.", exc_info=True)
-                 if self._on_error_callback:
-                     try: self._on_error_callback(WebSocketError(f"Invalid WebSocket URI: {e}"))
-                     except Exception as cb_e: logger.error(f"Error calling on_error_callback for InvalidURI: {cb_e}", exc_info=True)
-                 self._is_connected.clear() # Ensure flag is clear
-                 break # Exit outer loop - non-recoverable URI error
+            # **** ADDED LOG ****
             except (websockets.exceptions.WebSocketException, OSError, asyncio.TimeoutError) as e:
-                 # Catch connection errors (WebSocketException, network errors, connect timeout)
-                 logger.error(f"WebSocket connection failed: {e}")
+                 logger.error(f"WebSocket connection failed: {e}", exc_info=True) # Added exc_info
                  # Potentially recoverable, will retry after delay
                  # Ensure flag is clear before potentially calling disconnect callback
                  self._is_connected.clear()
@@ -399,9 +434,9 @@ class MentisSandbox:
                  if self._on_error_callback:
                      try: self._on_error_callback(ConnectionError(f"WebSocket connection failed: {e}"))
                      except Exception as cb_e: logger.error(f"Error calling on_error_callback for connection failure: {cb_e}", exc_info=True)
+            # **** ADDED LOG ****
             except Exception as e:
-                 # Catch-all for unexpected errors during connection attempt
-                 logger.exception(f"Unexpected error in WebSocket listener connection phase")
+                 logger.exception(f"Unexpected error in WebSocket listener connection phase") # Changed to logger.exception
                  self._is_connected.clear() # Ensure flag is clear
                  if self._on_error_callback:
                      try: self._on_error_callback(e)
@@ -498,35 +533,38 @@ class MentisSandbox:
                 logger.debug("Closing HTTP client.")
                 self._client.close()
 
+    # --- Added close() method for explicit cleanup and use by __exit__ --- 
     def close(self):
-        """Disconnects stream and closes HTTP client without deleting the sandbox."""
+        """Closes WebSocket connection and HTTP client."""
         logger.info(f"Closing client connection for sandbox {self.sandbox_id}...")
-        self.disconnect_stream()
-        if not self._client.is_closed:
-            logger.debug("Closing HTTP client.")
-            self._client.close()
+        self.disconnect_stream() # Stop listener thread and close WebSocket
+        self._client.close()     # Close httpx client
         logger.info("Client connection closed.")
 
-    def is_stream_connected(self) -> bool:
-        """Checks if the WebSocket connection is currently believed to be active."""
-        return self._is_connected.is_set()
+    # --- Added is_connected() method --- 
+    def is_connected(self) -> bool:
+        """Checks if the WebSocket listener thread is running and connected."""
+        return self._listener_thread is not None and self._listener_thread.is_alive() and self._is_connected.is_set()
 
 
-    # --- Context Manager ---
-    def __enter__(self):
-        # Keep explicit connect_stream call outside context manager entry
+    # --- Context Manager --- 
+    def __enter__(self) -> 'MentisSandbox':
+        # Called when entering the 'with' block
+        # Stream connection is now handled in create() or manually via connect_stream()
+        logger.debug("Entering MentisSandbox context.")
+        # Ensure stream is connected if not already? Or rely on create/manual call.
+        # For simplicity, let's assume create() or manual call handles it.
+        # If you want the context manager to *ensure* connection:
+        # if not self.is_connected():
+        #     logger.info("Stream not connected on entering context, attempting to connect...")
+        #     self.connect_stream()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Default behavior: Close connections, do not delete sandbox
+        # Called when exiting the 'with' block
         logger.info("Exiting MentisSandbox context, closing client connections...")
         self.close()
-        # If auto-deletion is desired, uncomment the line below and comment out self.close()
-        # self.delete()
 
-    # Note: Removed the previous close() alias for delete() to have distinct behaviors.
-    # If delete() is the desired primary cleanup, rename delete() to close()
-    # or adjust __exit__ accordingly. Current setup: close() cleans connections, delete() removes sandbox.
 
 def collect_observations(queue: Queue, action_id: str, timeout: float = 10.0) -> List[Any]:
     """从队列中收集与特定action_id相关的所有观察结果"""

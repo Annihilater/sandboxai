@@ -68,12 +68,12 @@ except Exception as ipy_init_err:
     ipy = None # Set ipy to None if initialization fails
 
 @app.get(
-    "/healthz",
+    "/health",
     summary="Check the health of the API",
     response_model=None, # No response body for simple health check
     status_code=200,     # Explicitly set success status code
 )
-def healthz():
+def health():
     # Optionally add checks here (e.g., is ipy initialized?)
     if ipy is None:
          # Return 503 Service Unavailable if IPython failed
