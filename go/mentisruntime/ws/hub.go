@@ -2,6 +2,7 @@ package ws
 
 import (
 	"log/slog"
+	"strings"
 	"sync"
 )
 
@@ -117,5 +118,61 @@ func (h *Hub) SubmitBroadcast(sandboxID string, message []byte) {
 	default:
 		// Hub's broadcast channel is full, might indicate a bottleneck or dead hub.
 		h.logger.Error("Hub broadcast channel full, discarding message", "sandboxID", sandboxID)
+	}
+}
+
+// BroadcastToSandbox sends a message to all clients connected for a specific sandbox.
+func (h *Hub) BroadcastToSandbox(sandboxID string, message []byte) {
+	h.mu.RLock()
+	subscribers, ok := h.sandboxSubscriptions[sandboxID]
+	h.mu.RUnlock()
+
+	if !ok || len(subscribers) == 0 {
+		h.logger.Debug("No subscribers for sandbox, discarding message", "sandboxID", sandboxID)
+		return
+	}
+
+	// *** ADDED DIAGNOSTIC LOGGING ***
+	clientAddrs := []string{}
+	h.mu.RLock()
+	for client := range subscribers {
+		clientAddrs = append(clientAddrs, client.conn.RemoteAddr().String())
+	}
+	h.mu.RUnlock()
+	h.logger.Debug("Broadcasting message details",
+		"sandboxID", sandboxID,
+		"numSubscribers", len(subscribers),
+		"subscriberAddrs", strings.Join(clientAddrs, ", "), // Log addresses
+		"messageContent", string(message))                   // Log content being sent
+	// *** END ADDED DIAGNOSTIC LOGGING ***
+
+	// Use a temporary map to avoid holding the lock while sending
+	clientsToSend := make(map[*Client]bool)
+	h.mu.RLock()
+	for client := range subscribers {
+		clientsToSend[client] = true
+	}
+	h.mu.RUnlock()
+
+	for client := range clientsToSend {
+		// *** ADDED DIAGNOSTIC LOGGING ***
+		h.logger.Debug("Attempting to send to client", "clientAddr", client.conn.RemoteAddr().String())
+		// *** END ADDED DIAGNOSTIC LOGGING ***
+		select {
+		case client.send <- message:
+			// *** ADDED DIAGNOSTIC LOGGING ***
+			h.logger.Debug("Successfully submitted to client channel", "clientAddr", client.conn.RemoteAddr().String())
+			// *** END ADDED DIAGNOSTIC LOGGING ***
+		default:
+			// If the send channel is full, assume the client is slow or disconnected.
+			// Close the client connection and remove it.
+			h.logger.Warn("Client send channel full, closing connection", "sandboxID", sandboxID, "clientAddr", client.conn.RemoteAddr().String())
+			// Need to run unregister in a goroutine or handle locking carefully
+			// to avoid deadlock if unregister tries to lock the hub.
+			go func(c *Client) {
+				h.unregister <- c // Send to unregister channel
+				// close(c.send) // Closing channel here might cause panic if writePump tries to read after close
+			}(client)
+		}
 	}
 }

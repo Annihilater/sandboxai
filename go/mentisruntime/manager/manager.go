@@ -644,77 +644,128 @@ func (m *SandboxManager) ReceiveInternalObservation(sandboxID string, observatio
 		return nil // Don't return error to agent, just ignore
 	}
 
-	// Always broadcast the raw data first to ensure clients receive it
-	// regardless of parsing success or failure
-	if m.hub != nil {
-		m.logger.Debug("Broadcasting raw observation data", "sandboxID", sandboxID)
-		m.hub.SubmitBroadcast(sandboxID, observationBytes)
+	// Parse the observation to understand its type and potentially trigger actions (like sending 'end')
+	// MODIFIED: Added ExitCode and Error fields (pointers) to capture top-level result/error data
+	var obs struct {
+		ObservationType string          `json:"observation_type"`
+		ActionID        string          `json:"action_id"`
+		Timestamp       time.Time       `json:"timestamp"`
+		Data            json.RawMessage `json:"data"` // Keep data raw initially for flexibility
+		ExitCode        *int            `json:"exit_code,omitempty"` // Added for result/error
+		Error           *string         `json:"error,omitempty"`     // Added for result/error
 	}
 
-	// Attempt to parse the incoming observation data
-	var obs Observation
 	if err := json.Unmarshal(observationBytes, &obs); err != nil {
-		m.logger.Error("Failed to unmarshal internal observation from agent", "error", err, "sandboxID", sandboxID, "rawData", string(observationBytes))
-		// Don't return error to agent, just log it and continue
-		return nil
+		m.logger.Error("Failed to parse internal observation JSON", "sandboxID", sandboxID, "rawData", string(observationBytes), "error", err)
+		// Decide if we should still broadcast the unparseable message? Maybe as an error type?
+		// For now, log and potentially ignore, or broadcast the raw bytes if that was the intended behavior.
+		// Let's broadcast the raw bytes if parsing fails, so client at least gets something.
+		if m.hub != nil {
+			m.logger.Warn("Broadcasting unparseable raw observation data", "sandboxID", sandboxID)
+			m.hub.SubmitBroadcast(sandboxID, observationBytes)
+		}
+		return fmt.Errorf("failed to parse observation JSON: %w", err)
 	}
-	// ***** 添加这个日志块 *****
+
 	m.logger.Debug("Parsed internal observation struct",
 		"sandboxID", sandboxID,
 		"parsedActionID", obs.ActionID,
 		"parsedObservationType", obs.ObservationType,
 		"parsedTimestamp", obs.Timestamp,
-		// "parsedData", obs.Data, // 暂时注释掉Data，避免可能的复杂对象打印问题
-		"rawData", string(observationBytes)) // 再次打印原始数据以便对比
-	// **************************
-	// Log the received observation
-	m.logger.Debug("Received internal observation", "sandboxID", sandboxID, "actionID", obs.ActionID, "type", obs.ObservationType)
+		"rawData", string(observationBytes)) // Log raw data along with parsed info
 
-	// Ensure actionID is present
-	if obs.ActionID == "" {
-		m.logger.Error("Received internal observation without action_id", "sandboxID", sandboxID, "type", obs.ObservationType, "rawData", string(observationBytes))
-		// Cannot process further without actionID
-		return nil // Ignore observation without actionID
-	}
-
-	// Broadcast the received observation via WebSocket hub
+	// Broadcast the parsed (original) bytes AFTER successful parsing
 	if m.hub != nil {
-		// Re-marshal the parsed object to ensure consistent format? Or send raw? Send raw for now.
+		m.logger.Debug("Broadcasting successfully parsed observation data", "sandboxID", sandboxID, "type", obs.ObservationType)
 		m.hub.SubmitBroadcast(sandboxID, observationBytes)
 	}
 
-	// Handle both 'result' and 'end' observation types to ensure proper completion
-	if obs.ObservationType == "result" || obs.ObservationType == "end" {
-		m.logger.Info(fmt.Sprintf("Received '%s' observation, sending 'end'", obs.ObservationType), "sandboxID", sandboxID, "actionID", obs.ActionID)
+	m.logger.Debug("Received internal observation", "sandboxID", sandboxID, "actionID", obs.ActionID, "type", obs.ObservationType)
 
-		// Extract exit code and error from the result data
-		var exitCode int = 0 // Default to success if parsing fails
-		var errorMsg string
-		
-		// Attempt to parse the Data field based on expected structure
-		if dataMap, ok := obs.Data.(map[string]interface{}); ok {
-			if ec, ok := dataMap["exit_code"].(float64); ok { // JSON numbers are float64
-				exitCode = int(ec)
-			} else if ec, ok := dataMap["exit_code"].(int); ok { // Handle direct int case
-				exitCode = ec
-			} else {
-				m.logger.Warn("Could not parse 'exit_code' from data", "actionID", obs.ActionID, "data", obs.Data)
-			}
-			if errMsg, ok := dataMap["error"].(string); ok {
-				errorMsg = errMsg
-			}
-		} else {
-			m.logger.Warn("Received observation with unexpected data format", "actionID", obs.ActionID, "type", obs.ObservationType, "data", obs.Data)
-		}
-
-		// Always send the 'end' observation to ensure client knows the action is complete
-		m.pushObservation(sandboxID, obs.ActionID, "end", EndObservationData{ExitCode: exitCode, Error: errorMsg})
+	// Process specific observation types (e.g., 'result' triggers 'end')
+	// MODIFIED: Pass the whole parsed obs struct to processParsedObservation
+	if err := m.processParsedObservation(sandboxID, &obs); err != nil {
+		// Log the error, but don't necessarily stop processing or return error to agent
+		m.logger.Error("Error processing parsed observation", "sandboxID", sandboxID, "actionID", obs.ActionID, "type", obs.ObservationType, "error", err)
 	}
 
 	return nil
 }
 
-// --- Space Management Methods (Delegated to SpaceManager) ---
+// processParsedObservation handles logic based on the observation type.
+// MODIFIED: Takes the parsed observation struct pointer as input
+func (m *SandboxManager) processParsedObservation(sandboxID string, obs *struct {
+	ObservationType string          `json:"observation_type"`
+	ActionID        string          `json:"action_id"`
+	Timestamp       time.Time       `json:"timestamp"`
+	Data            json.RawMessage `json:"data"`
+	ExitCode        *int            `json:"exit_code,omitempty"`
+	Error           *string         `json:"error,omitempty"`
+}) error {
+	switch obs.ObservationType {
+	case "result":
+		m.logger.Info("Received 'result' observation, sending 'end'", "sandboxID", sandboxID, "actionID", obs.ActionID)
+
+		// MODIFIED: Use ExitCode directly from the parsed obs struct
+		exitCode := 0 // Default to 0 if not present
+		if obs.ExitCode != nil {
+			exitCode = *obs.ExitCode
+		} else {
+			m.logger.Warn("Received 'result' observation without an exit_code, defaulting to 0", "sandboxID", sandboxID, "actionID", obs.ActionID)
+		}
+		m.sendEndObservation(sandboxID, obs.ActionID, exitCode)
+
+	case "error":
+		// Log agent-side errors
+		errorMsg := "Unknown agent error"
+		if obs.Error != nil {
+			errorMsg = *obs.Error
+		} else if obs.Data != nil && string(obs.Data) != "null" {
+			// Fallback to data field if error field is nil but data exists
+			errorMsg = string(obs.Data)
+		}
+		m.logger.Error("Received 'error' observation from agent", "sandboxID", sandboxID, "actionID", obs.ActionID, "errorData", errorMsg)
+
+		// MODIFIED: Use ExitCode if present, otherwise default to -1 for errors
+		exitCode := -1
+		if obs.ExitCode != nil {
+			exitCode = *obs.ExitCode
+		}
+		m.sendEndObservation(sandboxID, obs.ActionID, exitCode)
+
+	// Add cases for other types if needed (e.g., 'start', 'stream')
+	// Currently, 'start' is sent by InitiateAction, and 'stream' is just broadcast.
+	}
+	return nil
+}
+
+// sendEndObservation constructs and broadcasts an 'end' observation.
+func (m *SandboxManager) sendEndObservation(sandboxID, actionID string, exitCode int) {
+	if m.hub == nil {
+		return
+	}
+
+	endData := map[string]interface{}{
+		"exit_code": exitCode,
+	}
+
+	// Construct the end observation message
+	endMsg := map[string]interface{}{
+		"observation_type": "end",
+		"action_id":        actionID,
+		"timestamp":        time.Now().UTC().Format(time.RFC3339Nano),
+		"data":             endData,
+	}
+
+	endBytes, err := json.Marshal(endMsg)
+	if err != nil {
+		m.logger.Error("Failed to marshal 'end' observation", "sandboxID", sandboxID, "actionID", actionID, "error", err)
+		return
+	}
+
+	m.logger.Debug("Pushing observation via Hub", "sandboxID", sandboxID, "actionID", actionID, "type", "end", "size", len(endBytes))
+	m.hub.SubmitBroadcast(sandboxID, endBytes)
+}
 
 // CreateSpace delegates to SpaceManager.
 func (m *SandboxManager) CreateSpace(ctx context.Context, name string, description string, metadata map[string]interface{}) (string, error) {
