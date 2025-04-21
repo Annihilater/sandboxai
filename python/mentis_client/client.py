@@ -155,8 +155,7 @@ class MentisSandbox:
 
     def _post_action(self, endpoint: str, payload: Dict[str, Any]) -> str:
         """Helper to POST an action and return action_id."""
-        action_id = str(uuid.uuid4()) # Generate client-side action ID
-        payload["action_id"] = action_id
+        # 不再生成客户端action_id，让服务器生成
         url = f"/sandboxes/{self.sandbox_id}/{endpoint}"
         logger.debug(f"Posting action to {url}: {payload}")
         try:
@@ -164,7 +163,10 @@ class MentisSandbox:
 
             if response.status_code == 202:
                 data = response.json()
-                server_action_id = data.get("action_id", action_id) # Prefer server's ID if returned
+                server_action_id = data.get("action_id")
+                if not server_action_id:
+                    logger.warning(f"服务器未返回action_id，这可能导致观察结果无法正确匹配")
+                    server_action_id = str(uuid.uuid4())  # 仅在服务器未返回ID时生成一个备用ID
                 logger.info(f"Action accepted by server. Type: {endpoint}, ActionID: {server_action_id}")
                 return server_action_id
             else:
@@ -172,7 +174,7 @@ class MentisSandbox:
                      error_detail = response.json().get('detail', response.text)
                  except Exception:
                      error_detail = response.text
-                 raise APIError(f"Action failed (HTTP {response.status_code}): {error_detail}", status_code=response.status_code, action_id=action_id)
+                 raise APIError(f"Action failed (HTTP {response.status_code}): {error_detail}", status_code=response.status_code)
         except httpx.RequestError as e:
             raise ConnectionError(f"API request failed for action {endpoint}: {e}") from e
         except Exception as e:
@@ -199,6 +201,121 @@ class MentisSandbox:
         payload = {"code": code}
         if timeout: payload["timeout"] = timeout
         return self._post_action("ipython", payload)
+        
+    def run_code(self, code: str, timeout: Optional[float]=30.0) -> Union[str, Any]:
+        """
+        Runs Python code in IPython and returns the result.
+        This is a simplified wrapper around run_ipython_cell that handles observation collection.
+        
+        Args:
+            code: The Python code to execute
+            timeout: Maximum time to wait for execution to complete (seconds)
+            
+        Returns:
+            The result of the code execution, or any output if no explicit result
+            
+        Raises:
+            MentisSandboxError: If execution fails or times out
+        """
+        from queue import Queue, Empty
+        import time
+        from typing import cast, Any
+        from .models import IPythonResultObservation, IPythonOutputObservationPart
+        
+        # Create a temporary queue if we don't have one already
+        temp_queue = None
+        if not hasattr(self, '_observation_queue') or self._observation_queue is None:
+            temp_queue = Queue()
+            self._observation_queue = temp_queue
+            
+        # Make sure we're connected to the stream
+        if not self.is_stream_connected():
+            self.connect_stream()
+            
+        # Run the code
+        action_id = self.run_ipython_cell(code)
+        logger.info(f"服务器生成的action_id: {action_id}")
+        
+        # Collect observations
+        observations = []
+        final_result = None
+        final_output = ""
+        error_message = None
+        
+        # 跟踪已收到的观察结果
+        received_result = False
+        
+        # Simple observation collection loop
+        start_time = time.time()
+        while time.time() - start_time < timeout and not received_result:
+            try:
+                # Get observation with timeout
+                obs = self._observation_queue.get(timeout=0.2)
+                
+                # 记录观察结果的action_id，用于调试和跟踪
+                obs_action_id = getattr(obs, 'action_id', None)
+                if obs_action_id and obs_action_id != action_id:
+                    logger.debug(f"忽略不匹配的action_id: {obs_action_id}，期望: {action_id}")
+                    continue  # 跳过不匹配的观察结果
+                
+                observations.append(obs)
+                
+                # Process observation based on type
+                if obs.observation_type in ["IPythonOutputObservationPart", "stream"]:
+                    output_part = cast(IPythonOutputObservationPart, obs)
+                    if output_part.stream == "stdout":
+                        content = output_part.data if hasattr(output_part, 'data') and output_part.data else getattr(output_part, 'line', '')
+                        if content:
+                            final_output += content
+                            logger.debug(f"收到stdout输出: {content[:50]}{'...' if len(content) > 50 else ''}")
+                    elif output_part.stream == "stderr":
+                        content = output_part.data if hasattr(output_part, 'data') and output_part.data else getattr(output_part, 'line', '')
+                        if content:
+                            final_output += f"[STDERR] {content}"
+                            logger.debug(f"收到stderr输出: {content[:50]}{'...' if len(content) > 50 else ''}")
+                    elif output_part.stream == "execute_result" and isinstance(output_part.data, dict):
+                        # Try to extract text/plain output
+                        plain_text = output_part.data.get("text/plain", "")
+                        if plain_text:
+                            final_result = plain_text
+                            logger.debug(f"收到执行结果: {plain_text[:50]}{'...' if len(plain_text) > 50 else ''}")
+                
+                # Check for result/end observation
+                elif obs.observation_type in ["IPythonResultObservation", "result", "end"]:
+                    result_obs = cast(IPythonResultObservation, obs)
+                    logger.info(f"收到结果观察: 类型={obs.observation_type}, action_id={obs_action_id}, 状态={result_obs.status}")
+                    if result_obs.status == 'error' or getattr(result_obs, 'exit_code', 0) != 0:
+                        error_name = getattr(result_obs, 'error_name', 'Error')
+                        error_value = getattr(result_obs, 'error_value', 'Unknown error')
+                        error_message = f"{error_name}: {error_value}"
+                        logger.warning(f"执行错误: {error_message}")
+                    received_result = True  # 标记已收到结果
+                    break  # Exit loop when we get a result
+                    
+                # Check for error observation
+                elif obs.observation_type == "ErrorObservation":
+                    error_message = getattr(obs, 'message', 'Unknown error')
+                    logger.warning(f"错误观察: {error_message}")
+                    received_result = True  # 标记已收到结果
+                    break
+                    
+            except Empty:
+                continue
+                
+        # Clean up temporary queue if we created one
+        if temp_queue:
+            self._observation_queue = None
+            
+        # Handle timeout
+        if not any(obs.observation_type in ["IPythonResultObservation", "result", "end"] for obs in observations):
+            raise MentisSandboxError(f"Code execution timed out after {timeout} seconds")
+            
+        # Handle error
+        if error_message:
+            raise MentisSandboxError(f"Code execution failed: {error_message}")
+            
+        # Return result or output
+        return final_result if final_result is not None else final_output.strip()
 
     # --- Streaming Connection Methods ---
 
