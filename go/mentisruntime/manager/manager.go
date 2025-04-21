@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker/api/types"   // 重新添加 types 包以使用 ContainerJSON
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
@@ -44,6 +45,7 @@ type SpaceState struct {
 
 // SandboxState represents the state of a sandbox
 type SandboxState struct {
+	ID          string `json:"sandbox_id"` // Add ID field with JSON tag
 	ContainerID string
 	AgentURL    string // e.g., http://<container_ip>:<agent_port>
 	IsRunning   bool
@@ -358,9 +360,16 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, spaceID string, imag
 			Labels:       labels,
 			Env:          envVars,
 			ExposedPorts: nat.PortSet{nat.Port(agentPort): struct{}{}}, // Expose agent port
-			Cmd:          command, // Use the command parameter
+			// Cmd:          command, // REMOVE THIS LINE - Let the image's default command run
+			// 确保 Tty 和 OpenStdin 设置为 true，这对于交互式容器（如运行 bash）很重要
+			// Tty 和 OpenStdin 可能不再需要，取决于 Agent 的实现方式，暂时保留
+			Tty:       true, 
+			OpenStdin: true,
 		},
 		&container.HostConfig{
+			// 删除之前添加的端口绑定
+			// 添加网络模式设置，确保使用默认网络
+			NetworkMode: "bridge",
 			// AutoRemove: true, // Consider adding this if desired
 		},
 		&network.NetworkingConfig{ // Default network is usually fine
@@ -388,63 +397,127 @@ func (m *SandboxManager) CreateSandbox(ctx context.Context, spaceID string, imag
 		}
 		return "", fmt.Errorf("failed to start container %s: %w", resp.ID, err)
 	}
-
-	// 4. Inspect the container to get its IP address on the default bridge network
-	// Use a new context for this inspection
-	inspectStartCtx, inspectStartCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer inspectStartCancel()
-	inspectData, err := m.dockerClient.ContainerInspect(inspectStartCtx, resp.ID)
-	if err != nil {
-		m.logger.Error("Failed to inspect container after start", "sandboxID", sandboxID, "containerID", resp.ID, "error", err)
-		// Consider stopping and removing the container here as well
-		return "", fmt.Errorf("failed to inspect container %s: %w", resp.ID, err)
+	
+	// 添加诊断日志，查看容器是否成功启动
+	m.logger.Info("Container started, checking status", "sandboxID", sandboxID, "containerID", resp.ID)
+	
+	// 立即检查容器状态，添加更多诊断信息
+	diagCtx, diagCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer diagCancel()
+	inspectAfterStart, diagErr := m.dockerClient.ContainerInspect(diagCtx, resp.ID)
+	if diagErr != nil {
+		m.logger.Warn("Failed to inspect container after start for diagnostics", "error", diagErr)
+	} else {
+		m.logger.Info("Container status after start", 
+			"state", inspectAfterStart.State.Status,
+			"running", inspectAfterStart.State.Running,
+			"exitCode", inspectAfterStart.State.ExitCode,
+			"error", inspectAfterStart.State.Error,
+			"startedAt", inspectAfterStart.State.StartedAt)
 	}
 
-	// Find IP address - assumes default bridge network
+	// 4. 获取容器 IP 地址的改进逻辑 - 添加多次重试
 	var containerIP string
-	if inspectData.NetworkSettings != nil && inspectData.NetworkSettings.Networks != nil {
-		// Prefer non-default bridge network if available (more robust)
-		for name, netSettings := range inspectData.NetworkSettings.Networks {
-			if name != "bridge" && netSettings.IPAddress != "" {
-				containerIP = netSettings.IPAddress
-				m.logger.Debug("Found container IP on non-default network", "network", name, "ip", containerIP)
-				break
-			}
+	var mappedPort string  // 添加 mappedPort 变量定义
+	var inspectData types.ContainerJSON   
+	maxRetries := 5 // 最大重试次数
+	retryDelay := 1 * time.Second // 每次重试间隔
+
+	m.logger.Info("Waiting for container network setup", "sandboxID", sandboxID, "containerID", resp.ID, "maxRetries", maxRetries)
+
+	var lastInspectErr error
+	for retry := 0; retry < maxRetries; retry++ {
+		// 创建每次检查的新上下文
+		inspectCtx, inspectCancel := context.WithTimeout(ctx, 10*time.Second)
+		inspectData, lastInspectErr = m.dockerClient.ContainerInspect(inspectCtx, resp.ID)
+		inspectCancel()
+
+		if lastInspectErr != nil {
+			m.logger.Warn("Container inspect failed on retry", "retry", retry+1, "error", lastInspectErr)
+			time.Sleep(retryDelay)
+			continue
 		}
-		// Fallback to bridge network if no other IP found
-		if containerIP == "" {
-			if bridgeSettings, ok := inspectData.NetworkSettings.Networks["bridge"]; ok && bridgeSettings.IPAddress != "" {
-				containerIP = bridgeSettings.IPAddress
-				m.logger.Debug("Found container IP on default bridge network", "ip", containerIP)
-			}
+
+		// 检查容器是否正在运行
+		if !inspectData.State.Running {
+			m.logger.Warn("Container not running yet", "retry", retry+1, "state", inspectData.State.Status)
+			time.Sleep(retryDelay)
+			continue
 		}
-		// Fallback to the first available IP if still not found (less ideal)
-		if containerIP == "" {
-			for name, netSettings := range inspectData.NetworkSettings.Networks {
-				if netSettings.IPAddress != "" {
-					containerIP = netSettings.IPAddress
-					m.logger.Warn("Falling back to first available container IP", "network", name, "ip", containerIP)
-					break
+
+		// 尝试方法1: 检查网络设置中的 IP 地址
+		if inspectData.NetworkSettings != nil {
+			// 先检查端口映射
+			if len(inspectData.NetworkSettings.Ports) > 0 {
+				if portBindings, exists := inspectData.NetworkSettings.Ports[nat.Port(agentPort)]; exists && len(portBindings) > 0 {
+					mappedPort = portBindings[0].HostPort  // 给 mappedPort 变量赋值
+					m.logger.Info("Found mapped port", "containerPort", agentPort, "hostPort", mappedPort)
 				}
 			}
+
+			// 尝试获取网络中的 IP 地址
+			if inspectData.NetworkSettings.Networks != nil {
+				for netName, netConfig := range inspectData.NetworkSettings.Networks {
+					if netConfig.IPAddress != "" {
+						containerIP = netConfig.IPAddress
+						m.logger.Info("Found container IP address", "network", netName, "ip", containerIP)
+						break
+					}
+				}
+			}
+
+			// 尝试方法2: 使用主网络设置中的 IP 地址
+			if containerIP == "" && inspectData.NetworkSettings.IPAddress != "" {
+				containerIP = inspectData.NetworkSettings.IPAddress
+				m.logger.Info("Using root NetworkSettings.IPAddress", "ip", containerIP)
+			}
+		}
+
+		// 如果找到了 IP 地址，跳出循环
+		if containerIP != "" {
+			break
+		}
+
+		m.logger.Info("No IP address found yet, retrying", "retry", retry+1, "maxRetries", maxRetries)
+		time.Sleep(retryDelay)
+	}
+
+	// 如果经过所有重试还是没有找到 IP 地址，则使用备用方案
+	if containerIP == "" {
+		// 尝试使用主机 IP 和映射端口作为备用方案
+		if mappedPort != "" {
+			// 使用本地主机 IP (127.0.0.1) 和映射的端口
+			containerIP = "127.0.0.1"
+			m.logger.Warn("Could not find container IP, using host IP and mapped port as fallback", "hostIP", containerIP, "mappedPort", mappedPort)
+		} else {
+			// 如果连端口映射也找不到，则清理容器并返回错误
+			m.logger.Error("Failed to find container IP address or mapped port after multiple retries", "sandboxID", sandboxID, "containerID", resp.ID)
+			
+			// 清理创建的容器
+			rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer rmCancel()
+			_ = m.dockerClient.ContainerRemove(rmCtx, resp.ID, container.RemoveOptions{Force: true})
+			
+			return "", fmt.Errorf("failed to find IP address for container %s after %d retries", resp.ID, maxRetries)
 		}
 	}
 
-	if containerIP == "" {
-		m.logger.Error("Failed to find container IP address", "sandboxID", sandboxID, "containerID", resp.ID, "networks", inspectData.NetworkSettings.Networks)
-		// Consider stopping and removing the container
-		rmCtx, rmCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer rmCancel()
-		_ = m.dockerClient.ContainerRemove(rmCtx, resp.ID, container.RemoveOptions{Force: true})
-		return "", fmt.Errorf("failed to find IP address for container %s", resp.ID)
+	// 5. Construct Agent URL based on IP or host with proper port
+	var agentURL string
+	if mappedPort != "" && containerIP == "127.0.0.1" {
+		// 如果使用主机 IP 作为备用，使用映射的端口
+		agentURL = fmt.Sprintf("http://%s:%s", containerIP, mappedPort)
+	} else {
+		// 否则使用容器 IP 和容器内端口
+		portNum := strings.Split(agentPort, "/")[0]
+		agentURL = fmt.Sprintf("http://%s:%s", containerIP, portNum)
 	}
 
-	// 5. Construct Agent URL
-	portNum := strings.Split(agentPort, "/")[0]
-	agentURL := fmt.Sprintf("http://%s:%s", containerIP, portNum)
+	m.logger.Info("Constructed agent URL", "sandboxID", sandboxID, "agentURL", agentURL)
 
-	// Create sandbox state
+	// 6. 创建沙箱状态并存储
 	state := &SandboxState{
+		ID:          sandboxID, // 设置 ID 字段为沙箱 ID
 		ContainerID: resp.ID,
 		AgentURL:    agentURL,
 		IsRunning:   true,

@@ -214,6 +214,17 @@ type CreateSandboxRequest struct {
 
 // CreateSandboxHandler handles requests to create a new sandbox.
 func (h *APIHandler) CreateSandboxHandler(w http.ResponseWriter, r *http.Request) {
+	// --- Get spaceID from path --- 
+	vars := mux.Vars(r)
+	spaceID := vars["spaceID"]
+	if spaceID == "" {
+		// If spaceID is missing in the path, maybe default or error?
+		// For now, let's assume it's required in the path based on the route definition.
+		WriteError(w, "Missing spaceID in path", http.StatusBadRequest)
+		return
+	}
+
+	// --- Decode request body --- 
 	var req CreateSandboxRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -221,51 +232,39 @@ func (h *APIHandler) CreateSandboxHandler(w http.ResponseWriter, r *http.Request
 	}
 	defer r.Body.Close()
 
-	// Use "default" space if not provided
-	if req.SpaceID == "" {
-		req.SpaceID = "default"
-	}
-
-	// Validate space exists (optional but good practice)
-	_, spaceErr := h.spaceManager.GetSpace(r.Context(), req.SpaceID)
+	// --- Validate space exists --- 
+	_, spaceErr := h.spaceManager.GetSpace(r.Context(), spaceID)
 	if spaceErr != nil {
 		if errors.Is(spaceErr, manager.ErrSpaceNotFound) {
-			WriteError(w, fmt.Sprintf("Space %s not found", req.SpaceID), http.StatusNotFound)
+			WriteError(w, fmt.Sprintf("Space %s not found", spaceID), http.StatusNotFound)
 		} else {
-			h.logger.Error("Failed to validate space during sandbox creation", "spaceID", req.SpaceID, "error", spaceErr)
+			h.logger.Error("Failed to validate space during sandbox creation", "spaceID", spaceID, "error", spaceErr)
 			WriteError(w, "Failed to validate space: "+spaceErr.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 
-	h.logger.Info("Received request to create sandbox", "spaceID", req.SpaceID, "image", req.Image, "command", req.Command)
+	h.logger.Info("Received request to create sandbox", "spaceID", spaceID, "image", req.Image, "command", req.Command)
 
-	// Prepare command as a slice
+	// --- Prepare command slice (currently unused due to previous fix) --- 
 	var commandSlice []string
-	if req.Command != "" {
-		// Simple case: treat the whole string as the command/entrypoint
-		commandSlice = []string{req.Command}
-		// Alternative (if splitting by space is desired):
-		// commandSlice = strings.Fields(req.Command)
-	}
+	// if req.Command != "" { 
+	// 	commandSlice = []string{req.Command}
+	// }
 
-
-	// Call manager to create sandbox, passing command as a slice
-	// sandboxID, err := h.sandboxManager.CreateSandbox(r.Context(), req.SpaceID, req.Image, req.Command)
-	sandboxID, err := h.sandboxManager.CreateSandbox(r.Context(), req.SpaceID, req.Image, commandSlice) // Pass slice
+	// --- Call manager to create sandbox --- 
+	sandboxID, err := h.sandboxManager.CreateSandbox(r.Context(), spaceID, req.Image, commandSlice) // Pass empty slice
 	if err != nil {
-		h.logger.Error("Failed to create sandbox", "spaceID", req.SpaceID, "image", req.Image, "command", req.Command, "error", err)
-		// Map manager errors to HTTP status codes
-		if errors.Is(err, manager.ErrSpaceNotFound) {
-			WriteError(w, fmt.Sprintf("Space %s not found", req.SpaceID), http.StatusNotFound)
+		h.logger.Error("Failed to create sandbox", "spaceID", spaceID, "image", req.Image, "command", req.Command, "error", err)
+		if errors.Is(err, manager.ErrSpaceNotFound) { // Should be caught by space validation above, but keep for safety
+			WriteError(w, fmt.Sprintf("Space %s not found", spaceID), http.StatusNotFound)
 		} else {
-			// Provide more context in the error message
 			WriteError(w, fmt.Sprintf("Failed to create sandbox: %v", err), http.StatusInternalServerError)
 		}
 		return
 	}
 
-	// Retrieve the created sandbox state to include in the response
+	// --- Retrieve the created sandbox state to include in the response --- 
 	sandboxState, getErr := h.sandboxManager.GetSandbox(r.Context(), sandboxID)
 	if getErr != nil {
 		// This shouldn't happen right after creation, but handle defensively
@@ -274,17 +273,17 @@ func (h *APIHandler) CreateSandboxHandler(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{
-			"sandbox_id": sandboxID,
+			"sandbox_id": sandboxID, // Use snake_case for consistency?
 			"warning":    "Sandbox created, but failed to retrieve its full state.",
 		})
 		return
 	}
 
-
+	// --- Return successful response with sandbox details --- 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated) // 201 Created
 	// Return the full sandbox state in the response
-	json.NewEncoder(w).Encode(sandboxState)
+	json.NewEncoder(w).Encode(sandboxState) // Encode the retrieved state
 }
 
 // GetSandboxHandler handles requests to retrieve a specific sandbox.
