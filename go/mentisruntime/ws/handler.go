@@ -15,10 +15,10 @@ import (
 // It now accepts a SandboxChecker interface instead of a concrete manager.
 func ServeWs(hub *Hub, checker SandboxChecker, w http.ResponseWriter, r *http.Request, logger *slog.Logger) {
 	vars := mux.Vars(r)
-	sandboxID, ok := vars["sandbox_id"]
+	sandboxID, ok := vars["sandboxID"]
 	if !ok {
-		logger.Error("Missing sandbox_id in WebSocket path")
-		http.Error(w, "Missing sandbox_id", http.StatusBadRequest)
+		logger.Error("Missing sandboxID in WebSocket path")
+		http.Error(w, "Missing sandboxID", http.StatusBadRequest)
 		return
 	}
 

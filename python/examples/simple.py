@@ -2,6 +2,7 @@
 import logging
 import os
 from mentis_client import MentisSandbox, MentisSandboxError
+from mentis_client.client import collect_observations
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -17,11 +18,15 @@ def main():
         # 使用简化的 API 创建 Sandbox 并执行代码
         with MentisSandbox.create(base_url=BASE_URL) as sandbox:
             # 简单的打印语句
-            result1 = sandbox.run_code("print('Hello world!')")
+            action_id = sandbox.run_ipython_cell("print('Hello world!')")
+            observations = collect_observations(obs_queue, action_id)
+            result1 = "".join([obs.line for obs in observations if hasattr(obs, 'line')])
             logger.info(f"执行结果1: {result1}")
             
             # 执行计算并返回结果
-            result2 = sandbox.run_code("5 * 8")
+            action_id = sandbox.run_ipython_cell("5 * 8")
+            observations = collect_observations(obs_queue, action_id)
+            result2 = "".join([obs.line for obs in observations if hasattr(obs, 'line')])
             logger.info(f"执行结果2: {result2}")
             
             # 多行代码示例
@@ -40,12 +45,14 @@ def main():
             mean
             """
             try:
-                result3 = sandbox.run_code(multi_line_code)
+                action_id = sandbox.run_ipython_cell(multi_line_code)
+                observations = collect_observations(obs_queue, action_id)
+                result3 = "".join([obs.line for obs in observations if hasattr(obs, 'line')])
                 logger.info(f"执行结果3: {result3}")
             except MentisSandboxError as e:
                 # numpy可能未安装，捕获可能的错误
                 logger.warning(f"执行多行代码时出错: {e}")
-            
+     
     except MentisSandboxError as e:
         logger.error(f"Sandbox 操作失败: {e}")
 

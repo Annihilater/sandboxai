@@ -1,0 +1,75 @@
+[
+    {
+        "name": "create space",
+        "operation": "create_space",
+        "request": {
+            "name": "test-space",
+            "description": "Test space for e2e testing"
+        },
+        "expected": {
+            "name": "test-space",
+            "description": "Test space for e2e testing"
+        }
+    },
+    {
+        "name": "get space",
+        "operation": "get_space",
+        "space_id": "test-space",
+        "expected": {
+            "name": "test-space",
+            "description": "Test space for e2e testing"
+        }
+    },
+    {
+        "name": "update space",
+        "operation": "update_space",
+        "space_id": "test-space",
+        "request": {
+            "description": "Updated test space description"
+        },
+        "expected": {
+            "name": "test-space",
+            "description": "Updated test space description"
+        }
+    },
+    {
+        "name": "create sandbox",
+        "operation": "create_sandbox",
+        "space_id": "test-space",
+        "request": {
+            "name": "test-sandbox",
+            "spec": {
+                "image": "python:3.9"
+            }
+        },
+        "expected": {
+            "name": "test-sandbox",
+            "spec": {
+                "image": "python:3.9"
+            }
+        }
+    },
+    {
+        "name": "get sandbox",
+        "operation": "get_sandbox",
+        "space_id": "test-space",
+        "sandbox_id": "test-sandbox",
+        "expected": {
+            "name": "test-sandbox",
+            "spec": {
+                "image": "python:3.9"
+            }
+        }
+    },
+    {
+        "name": "delete sandbox",
+        "operation": "delete_sandbox",
+        "space_id": "test-space",
+        "sandbox_id": "test-sandbox"
+    },
+    {
+        "name": "delete space",
+        "operation": "delete_space",
+        "space_id": "test-space"
+    }
+] 

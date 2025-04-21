@@ -1,0 +1,77 @@
+[
+    {
+        "name": "invalid space id",
+        "operation": "get_space",
+        "space_id": "non-existent-space",
+        "expected_error": {
+            "type": "MentisAPIError",
+            "status_code": 404,
+            "message_contains": "space not found"
+        }
+    },
+    {
+        "name": "invalid sandbox id",
+        "operation": "get_sandbox",
+        "space_id": "test-space",
+        "sandbox_id": "non-existent-sandbox",
+        "expected_error": {
+            "type": "MentisAPIError",
+            "status_code": 404,
+            "message_contains": "sandbox not found"
+        }
+    },
+    {
+        "name": "invalid image tag",
+        "operation": "create_sandbox",
+        "space_id": "test-space",
+        "request": {
+            "name": "invalid-sandbox",
+            "spec": {
+                "image": "python"
+            }
+        },
+        "expected_error": {
+            "type": "MentisValidationError",
+            "message_contains": "Image must include a tag"
+        }
+    },
+    {
+        "name": "duplicate space name",
+        "operation": "create_space",
+        "request": {
+            "name": "test-space"
+        },
+        "expected_error": {
+            "type": "MentisAPIError",
+            "status_code": 409,
+            "message_contains": "space already exists"
+        }
+    },
+    {
+        "name": "invalid request format",
+        "operation": "create_space",
+        "request": {
+            "invalid_field": "value"
+        },
+        "expected_error": {
+            "type": "MentisValidationError",
+            "message_contains": "validation error"
+        }
+    },
+    {
+        "name": "server timeout",
+        "operation": "create_sandbox",
+        "space_id": "test-space",
+        "request": {
+            "name": "timeout-sandbox",
+            "spec": {
+                "image": "python:3.9"
+            }
+        },
+        "timeout": 0.1,
+        "expected_error": {
+            "type": "MentisTimeoutError",
+            "message_contains": "Request timed out"
+        }
+    }
+] 

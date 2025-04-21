@@ -1,9 +1,9 @@
 module github.com/foreveryh/sandboxai/go
 
-go 1.23.5
+go 1.24
 
 require (
-	github.com/docker/docker v27.5.0+incompatible
+	github.com/docker/docker v28.1.1+incompatible
 	github.com/docker/go-connections v0.5.0
 	github.com/gorilla/mux v1.8.1 // Added
 	github.com/gorilla/websocket v1.5.3 // Added
@@ -12,7 +12,10 @@ require (
 	github.com/stretchr/testify v1.10.0
 )
 
-require github.com/google/uuid v1.6.0
+require (
+	github.com/go-chi/chi v1.5.5
+	github.com/google/uuid v1.6.0
+)
 
 require (
 	github.com/Microsoft/go-winio v0.4.14 // indirect
@@ -25,6 +28,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

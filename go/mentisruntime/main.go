@@ -28,8 +28,6 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
-
 	// --- Configuration --- 
 	host, ok := os.LookupEnv("SANDBOXAID_HOST")
 	if !ok {
@@ -52,55 +50,78 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
 
-	// --- Docker Client (for Manager) --- 
+	// --- Initialize Managers ---
+	// Create Docker client
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.Error("Failed to create Docker client", "error", err)
 		os.Exit(1)
 	}
-	defer dockerClient.Close()
-
-	// --- WebSocket Hub --- 
+	logger.Info("Docker client initialized")
+	
+	// Create WebSocket hub
 	hub := ws.NewHub(logger)
 	go hub.Run()
+	logger.Info("WebSocket hub started")
 
-	// --- Sandbox Manager --- 
-	// Assuming NewSandboxManager signature: ctx, dockerClient, hub, logger, scope
-	sandboxManager, err := manager.NewSandboxManager(ctx, dockerClient, hub, logger, scope)
+	// Create Space Manager first
+	spaceManager := manager.NewSpaceManager(logger)
+	logger.Info("Space manager initialized")
+	
+	// Create Sandbox Manager (depends on Space Manager)
+	sandboxManager, err := manager.NewSandboxManager(
+		context.Background(),
+		dockerClient,
+		hub,
+		spaceManager, // Add SpaceManager parameter
+		logger,
+		os.Getenv("SANDBOX_SCOPE"),
+	)
 	if err != nil {
-		logger.Error("Failed to create Sandbox Manager", "error", err)
+		logger.Error("Failed to create sandbox manager", "error", err)
 		os.Exit(1)
 	}
+	logger.Info("Sandbox manager initialized")
 
-	// --- API Handler --- 
-	// Assuming NewAPIHandler signature: logger, manager, hub
-	apiHandler := handler.NewAPIHandler(logger, sandboxManager, hub) // Inject hub
- 
- 	// --- Router --- 
- 	r := mux.NewRouter()
+	// --- Initialize API Handler ---
+	apiHandler := handler.NewAPIHandler(logger, sandboxManager, spaceManager, hub)
+	logger.Info("API handler initialized")
 
-	// Health Check Route
-	r.HandleFunc("/v1/healthz", handler.HealthCheckHandler).Methods("GET")
+	// --- Router --- 
+	router := mux.NewRouter()
 
-	// Existing API Routes (assuming they should be under /v1 prefix)
-	apiV1 := r.PathPrefix("/v1").Subrouter()
-	apiV1.HandleFunc("/sandboxes", apiHandler.CreateSandboxHandler).Methods("POST")
-	apiV1.HandleFunc("/sandboxes/{sandbox_id}", apiHandler.DeleteSandboxHandler).Methods("DELETE")
- 	apiV1.HandleFunc("/sandboxes/{sandbox_id}/shell", apiHandler.PostShellCommandHandler).Methods("POST")
- 	apiV1.HandleFunc("/sandboxes/{sandbox_id}/ipython", apiHandler.PostIPythonCellHandler).Methods("POST")
+	// Register handlers
+	api := router.PathPrefix("/v1").Subrouter()
+	api.HandleFunc("/health", handler.HealthCheckHandler).Methods("GET")
 
-	// WebSocket Route (under /v1)
-	apiV1.HandleFunc("/sandboxes/{sandbox_id}/stream", func(w http.ResponseWriter, r *http.Request) {
+	// Space routes (using chi style params)
+	api.HandleFunc("/spaces", apiHandler.CreateSpaceHandler).Methods("POST")
+	api.HandleFunc("/spaces", apiHandler.ListSpacesHandler).Methods("GET")
+	api.HandleFunc("/spaces/{spaceID}", apiHandler.GetSpaceHandler).Methods("GET")
+	api.HandleFunc("/spaces/{spaceID}", apiHandler.UpdateSpaceHandler).Methods("PUT")
+	api.HandleFunc("/spaces/{spaceID}", apiHandler.DeleteSpaceHandler).Methods("DELETE")
+
+	// Sandbox routes (associated with a space, using chi style params)
+	api.HandleFunc("/spaces/{spaceID}/sandboxes", apiHandler.CreateSandboxHandler).Methods("POST")
+	api.HandleFunc("/spaces/{spaceID}/sandboxes/{sandboxID}", apiHandler.GetSandboxHandler).Methods("GET")    // Added GET sandbox
+	api.HandleFunc("/spaces/{spaceID}/sandboxes/{sandboxID}", apiHandler.DeleteSandboxHandler).Methods("DELETE") // Corrected DELETE sandbox path
+
+	// Action routes (associated with a specific sandbox)
+	api.HandleFunc("/spaces/{spaceID}/sandboxes/{sandboxID}/tools:run_shell_command", apiHandler.PostShellCommandHandler).Methods("POST") // Corrected shell path
+	api.HandleFunc("/spaces/{spaceID}/sandboxes/{sandboxID}/tools:run_ipython_cell", apiHandler.PostIPythonCellHandler).Methods("POST") // Corrected ipython path
+
+	// Internal Observation Route
+	api.HandleFunc("/internal/observations/{sandboxID}", apiHandler.InternalObservationHandler).Methods("POST") // Changed to sandboxID
+
+	// WebSocket Route (associated with a specific sandbox)
+	router.HandleFunc("/v1/sandboxes/{sandboxID}/stream", func(w http.ResponseWriter, r *http.Request) { // Changed to sandboxID
 		// Assuming ServeWs signature: hub, checker, w, r, logger
 		// Pass sandboxManager as it implements the SandboxChecker interface
 		ws.ServeWs(hub, sandboxManager, w, r, logger)
 	})
 
-	// Internal Observation Route (under /v1)
-	apiV1.HandleFunc("/internal/observations/{sandbox_id}", apiHandler.InternalObservationHandler).Methods("POST")
- 
- 	// --- Cleanup Logic (using separate, original client) --- 
- 	if deleteOnShutdown {
+	// --- Cleanup Logic (using separate, original client) --- 
+	if deleteOnShutdown {
 		defer func() {
 			logger.Info("Cleanup: Ensuring all sandboxes are deleted")
 			// Use the original docker client specifically for cleanup as manager might not expose ListAll
@@ -138,7 +159,7 @@ func main() {
 	// --- HTTP Server --- 
 	server := &http.Server{
 		Addr:    fmt.Sprintf("%s:%s", host, port),
-		Handler: r, // Use the mux router
+		Handler: router, // Use the mux router
 	}
 
 	// --- Start Server Goroutine --- 
