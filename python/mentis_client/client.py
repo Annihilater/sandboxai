@@ -9,11 +9,19 @@ import logging
 import time
 import random # Added for jitter
 from typing import Callable, Dict, Any, Optional, Union, List
-from queue import Queue, Empty
+from queue import Queue, Empty # Import Queue and Empty
 
 from .exceptions import MentisSandboxError, ConnectionError, APIError, WebSocketError
 # Import Observation models and parsing function
-from .models import BaseObservation, parse_observation
+from .models import (
+    BaseObservation, 
+    parse_observation, # Make sure parse_observation is exported from models.py
+    IPythonOutputObservationPart, 
+    IPythonResultObservation, 
+    ErrorObservation, 
+    CmdOutputObservationPart, 
+    CmdEndObservation
+)
 
 logger = logging.getLogger(__name__) # Ensure logger is defined
 
@@ -565,6 +573,160 @@ class MentisSandbox:
         logger.info("Exiting MentisSandbox context, closing client connections...")
         self.close()
 
+    # --- Synchronous Execution Helpers ---
+    def _wait_for_action_results(
+        self,
+        action_id: str,
+        timeout: Optional[float] = 30.0
+    ) -> str:
+        """Internal helper to wait for observations for a specific action_id and return collected stdout/stderr."""
+        if not self._observation_queue:
+            raise RuntimeError("No observation_queue configured for this client instance. Synchronous execution requires a queue.")
+        # Removed connection check here, let queue.get handle timeouts/connection issues implicitly
+        # if not self.is_connected():
+        #     raise ConnectionError("WebSocket stream is not connected. Cannot wait for results.")
+
+        stdout_buffer = ""
+        stderr_buffer = ""
+        error_message = None
+        exit_code = None
+
+        start_time = time.monotonic()
+        while True:
+            try:
+                remaining_time = timeout - (time.monotonic() - start_time)
+                if remaining_time <= 0:
+                    logger.warning(f"Timeout waiting for results for action {action_id}")
+                    error_message = f"Timeout waiting for results (>{timeout}s)"
+                    break
+
+                obs: BaseObservation = self._observation_queue.get(timeout=remaining_time)
+
+                if obs.action_id == action_id:
+                    logger.debug(f"Sync wait received observation for action {action_id}: {obs.observation_type}")
+                    
+                    # IPython/Cmd Output (stdout/stderr)
+                    if obs.observation_type == "stream":
+                        if isinstance(obs, IPythonOutputObservationPart):
+                            if obs.stream == "stdout":
+                                stdout_buffer += obs.line
+                            elif obs.stream == "stderr": # Handle stderr for IPython
+                                stderr_buffer += obs.line
+                        elif isinstance(obs, CmdOutputObservationPart):
+                            if obs.stream == "stdout":
+                                stdout_buffer += obs.data
+                            elif obs.stream == "stderr":
+                                stderr_buffer += obs.data
+                                
+                    # IPython End
+                    elif obs.observation_type == "end" or obs.observation_type == "result":
+                        if isinstance(obs, IPythonResultObservation):
+                            exit_code = obs.exit_code
+                            if exit_code is not None and exit_code != 0:
+                                error_message = f"Execution failed with exit code {exit_code}. Error: {obs.error_name} - {obs.error_value}"
+                                # Optionally include traceback if available: obs.traceback
+                        break # Action finished
+                        
+                    # Cmd End
+                    elif obs.observation_type == "CmdEndObservation":
+                         if isinstance(obs, CmdEndObservation):
+                             exit_code = obs.exit_code
+                             if exit_code != 0:
+                                 error_message = f"Command failed with exit code {exit_code}"
+                         break # Action finished
+
+                    # General Error Observation
+                    elif obs.observation_type == "error":
+                        if isinstance(obs, ErrorObservation):
+                            error_message = f"Received error observation: {obs.message}"
+                        else:
+                            error_message = f"Received unknown error observation: {obs}"
+                        break
+                else:
+                    logger.debug(f"Sync wait ignoring observation for different action {obs.action_id}")
+                    # Re-queueing is complex, maybe log and continue
+                    # If this happens frequently, it might indicate an issue.
+
+            except Empty: # Use imported Empty
+                logger.warning(f"Queue empty, timeout waiting for results for action {action_id}")
+                error_message = f"Timeout waiting for results (queue empty >{remaining_time:.2f}s)"
+                break
+            except Exception as e:
+                logger.error(f"Error processing observation queue for action {action_id}: {e}", exc_info=True)
+                error_message = f"Client-side error processing results: {e}"
+                break
+
+        # Combine results
+        result_str = ""
+        if stdout_buffer:
+            result_str += f"STDOUT:\n{stdout_buffer.strip()}\n"
+        if stderr_buffer:
+            result_str += f"STDERR:\n{stderr_buffer.strip()}\n"
+        if error_message:
+             result_str += f"ERROR: {error_message}\n"
+        if exit_code is not None:
+             result_str += f"EXIT_CODE: {exit_code}\n"
+             
+        if not result_str:
+             return "Action completed with no output."
+             
+        return result_str.strip()
+
+    def execute_ipython_cell_sync(
+        self,
+        code: str,
+        timeout: Optional[float] = 30.0
+    ) -> str:
+        """
+        Executes an IPython cell and waits for its results synchronously.
+        Requires the client to be configured with an observation_queue and connected.
+        
+        Args:
+            code: The Python code to execute.
+            timeout: Maximum time to wait for the action to complete (seconds)
+            
+        Returns:
+            A string containing the aggregated stdout, stderr, and error/exit code information.
+            
+        Raises:
+            RuntimeError: If observation_queue is not configured.
+            ConnectionError: If the WebSocket stream is not connected.
+            APIError: If the initial action request fails.
+        """
+        action_id = self.run_ipython_cell(code) # APIError can be raised here
+        logger.info(f"Executing IPython cell synchronously. ActionID: {action_id}, Timeout: {timeout}s")
+        return self._wait_for_action_results(action_id, timeout)
+
+    def execute_shell_command_sync(
+        self,
+        command: str,
+        work_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = 30.0 # Combined timeout for API call + execution wait
+    ) -> str:
+        """
+        Executes a shell command and waits for its results synchronously.
+        Requires the client to be configured with an observation_queue and connected.
+
+        Args:
+            command: The shell command to execute.
+            work_dir: Optional working directory.
+            env: Optional environment variables.
+            timeout: Maximum time to wait for the action to complete (seconds).
+
+        Returns:
+            A string containing the aggregated stdout, stderr, and error/exit code information.
+            
+        Raises:
+            RuntimeError: If observation_queue is not configured.
+            ConnectionError: If the WebSocket stream is not connected.
+            APIError: If the initial action request fails.
+        """
+        # Note: The timeout in run_shell_command is for the *server-side* execution limit.
+        # The timeout here is for the *client-side* wait.
+        action_id = self.run_shell_command(command, work_dir=work_dir, env=env)
+        logger.info(f"Executing Shell command synchronously. ActionID: {action_id}, Timeout: {timeout}s")
+        return self._wait_for_action_results(action_id, timeout)
 
 def collect_observations(queue: Queue, action_id: str, timeout: float = 10.0) -> List[Any]:
     """从队列中收集与特定action_id相关的所有观察结果"""

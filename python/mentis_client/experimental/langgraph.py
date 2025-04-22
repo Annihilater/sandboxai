@@ -1,207 +1,303 @@
 # mentis_client/experimental/langgraph.py
-from typing import Type, Optional, Dict, Any, Callable, List, Union
-from pydantic import BaseModel, Field
+import logging
+import queue
+import asyncio
+import traceback
+import functools
+from typing import Type, Optional, Dict, Any, List, Union
+from pydantic import BaseModel, Field, PrivateAttr
 
-# 尝试导入langgraph，如果不可用则提供占位符类
+# Attempt to import BaseTool, handle ImportError
+try:
+    from langchain_core.tools import BaseTool
+    LANGCHAIN_CORE_AVAILABLE = True
+except ImportError:
+    # Define a dummy BaseTool if langchain_core is not available
+    class BaseTool:
+        name: str = "dummy_tool"
+        description: str = "Dummy tool"
+        args_schema: Optional[Type[BaseModel]] = None
+        
+        def _run(self, *args: Any, **kwargs: Any) -> str:
+            raise NotImplementedError("langchain_core not installed")
+            
+        async def _arun(self, *args: Any, **kwargs: Any) -> str:
+            raise NotImplementedError("langchain_core not installed")
+
+    LANGCHAIN_CORE_AVAILABLE = False
+    logging.warning("langchain_core not installed. Mentis LangGraph tools will inherit from a dummy BaseTool.")
+
+
+# Attempt to import langgraph components
 try:
     from langgraph.graph import StateGraph, END
     from langgraph.prebuilt import ToolNode
+    LANGGRAPH_AVAILABLE = True
 except ImportError:
-    # 如果langgraph未安装，提供基本的占位符类
+    # Define dummy classes if langgraph is not installed
     class StateGraph:
-        """当langgraph未安装时的占位符类"""
-        def __init__(self, *args, **kwargs):
-            pass
-        
-        def add_node(self, *args, **kwargs):
-            raise NotImplementedError("langgraph未安装，无法使用此功能")
-        
-        def add_edge(self, *args, **kwargs):
-            raise NotImplementedError("langgraph未安装，无法使用此功能")
-        
-        def compile(self, *args, **kwargs):
-            raise NotImplementedError("langgraph未安装，无法使用此功能")
-    
+        def __init__(self, *args, **kwargs): pass
+        def add_node(self, *args, **kwargs): raise NotImplementedError("langgraph not installed")
+        def add_edge(self, *args, **kwargs): raise NotImplementedError("langgraph not installed")
+        def compile(self, *args, **kwargs): raise NotImplementedError("langgraph not installed")
     END = "__end__"
-    
     class ToolNode:
-        """当langgraph未安装时的占位符类"""
+        # Make ToolNode callable even if langgraph isn't installed, to avoid immediate errors
+        # It will raise NotImplementedError only when actually called.
         def __init__(self, *args, **kwargs):
-            pass
-
-from mentis_client.client import MentisSandbox, collect_observations
-from ..embedded import EmbeddedMentisSandbox
-
-
-class MentisPythonToolConfig(BaseModel):
-    """MentisPythonTool的配置模型"""
-    name: str = Field("python_executor", description="工具的名称")
-    description: str = Field("在安全的沙箱环境中执行Python代码", description="工具的描述")
-    timeout: Optional[int] = Field(None, description="执行超时时间（秒）")
-
-
-class MentisShellToolConfig(BaseModel):
-    """MentisShellTool的配置模型"""
-    name: str = Field("shell_executor", description="工具的名称")
-    description: str = Field("在安全的沙箱环境中执行Shell命令", description="工具的描述")
-    timeout: Optional[int] = Field(None, description="执行超时时间（秒）")
-    work_dir: Optional[str] = Field(None, description="执行命令的工作目录")
-
-
-class MentisPythonTool:
-    """用于在MentisSandbox中执行Python代码的LangGraph工具"""
-    
-    def __init__(self, sandbox: Optional[MentisSandbox] = None, config: Optional[MentisPythonToolConfig] = None):
-        """
-        初始化工具。
-        
-        Args:
-            sandbox: 现有的MentisSandbox实例。如果未提供，将创建一个嵌入式沙箱。
-            config: 工具配置。如果未提供，将使用默认配置。
-        """
-        # 如果未提供沙箱，则创建一个嵌入式沙箱
-        self._sandbox = sandbox or EmbeddedMentisSandbox().sandbox
-        self._owns_sandbox = sandbox is None  # 跟踪我们是否创建了沙箱
-        self.config = config or MentisPythonToolConfig()
-    
-    def _run(self, code: str) -> str:
-        """Run Python code in the sandbox and return the result."""
-        action_id = self._sandbox.run_ipython_cell(code)
-        observations = collect_observations(self._obs_queue, action_id)
-        return "".join([obs.line for obs in observations if hasattr(obs, 'line')])
-    
-    def as_tool(self) -> Dict[str, Any]:
-        """
-        将此对象转换为LangGraph工具格式。
-        
-        Returns:
-            Dict[str, Any]: 工具定义。
-        """
-        return {
-            "type": "function",
-            "function": {
-                "name": self.config.name,
-                "description": self.config.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "在ipython单元格中执行的代码"
-                        }
-                    },
-                    "required": ["code"]
-                }
-            }
-        }
-    
-    def __del__(self):
-        """在对象被垃圾回收时清理资源"""
-        if hasattr(self, '_owns_sandbox') and self._owns_sandbox and hasattr(self, '_sandbox'):
-            try:
-                self._sandbox.delete()
-            except Exception:
-                pass  # 忽略清理错误
-
-
-class MentisShellTool:
-    """用于在MentisSandbox中执行Shell命令的LangGraph工具"""
-    
-    def __init__(self, sandbox: Optional[MentisSandbox] = None, config: Optional[MentisShellToolConfig] = None):
-        """
-        初始化工具。
-        
-        Args:
-            sandbox: 现有的MentisSandbox实例。如果未提供，将创建一个嵌入式沙箱。
-            config: 工具配置。如果未提供，将使用默认配置。
-        """
-        # 如果未提供沙箱，则创建一个嵌入式沙箱
-        self._sandbox = sandbox or EmbeddedMentisSandbox().sandbox
-        self._owns_sandbox = sandbox is None  # 跟踪我们是否创建了沙箱
-        self.config = config or MentisShellToolConfig()
-    
-    def __call__(self, command: str) -> str:
-        """
-        在沙箱中执行Shell命令。
-        
-        Args:
-            command: 要执行的Shell命令。
+            self.tools = kwargs.get('tools', [])
+        def __call__(self, *args, **kwargs):
+             raise NotImplementedError("langgraph not installed, ToolNode cannot be executed")
             
-        Returns:
-            str: 执行结果。
-        """
-        result = self._sandbox.run_shell_command(
-            command, 
-            timeout=self.config.timeout, 
-            work_dir=self.config.work_dir
-        )
-        return result
-    
-    def as_tool(self) -> Dict[str, Any]:
-        """
-        将此对象转换为LangGraph工具格式。
-        
-        Returns:
-            Dict[str, Any]: 工具定义。
-        """
-        return {
-            "type": "function",
-            "function": {
-                "name": self.config.name,
-                "description": self.config.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "要执行的bash命令"
-                        }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }
-    
-    def __del__(self):
-        """在对象被垃圾回收时清理资源"""
-        if hasattr(self, '_owns_sandbox') and self._owns_sandbox and hasattr(self, '_sandbox'):
-            try:
-                self._sandbox.delete()
-            except Exception:
-                pass  # 忽略清理错误
+    LANGGRAPH_AVAILABLE = False
+    logging.warning("langgraph not installed. LangGraph-specific features are unavailable.")
 
+from mentis_client.client import MentisSandbox
+from ..embedded import EmbeddedMentisSandbox, start_server, stop_server # Ensure imports are correct
 
-class MentisToolNode:
-    """用于在LangGraph中集成Mentis工具的节点工厂"""
-    
-    @staticmethod
-    def create(
-        tools: List[Union[MentisPythonTool, MentisShellTool]],
-        llm: Optional[Any] = None
-    ) -> ToolNode:
-        """
-        创建一个包含Mentis工具的LangGraph工具节点。
-        
-        Args:
-            tools: Mentis工具列表。
-            llm: 可选的语言模型实例，用于工具节点。
-            
-        Returns:
-            ToolNode: LangGraph工具节点。
-        """
-        tool_definitions = [tool.as_tool() for tool in tools]
-        tool_map = {tool.config.name: tool for tool in tools}
-        
-        def tool_executor(tool_name: str, tool_input: Dict[str, Any]) -> Any:
-            if tool_name not in tool_map:
-                raise ValueError(f"未知的工具: {tool_name}")
-            
-            tool = tool_map[tool_name]
-            if isinstance(tool, MentisPythonTool):
-                return tool(tool_input.get("code", ""))
-            elif isinstance(tool, MentisShellTool):
-                return tool(tool_input.get("command", ""))
+logger = logging.getLogger(__name__)
+
+# --- Helper to ensure sandbox has a queue ---
+def _ensure_sandbox_with_queue(sandbox: Optional[MentisSandbox]) -> MentisSandbox:
+    """Ensures a sandbox instance exists and has an observation queue."""
+    if sandbox:
+        if not hasattr(sandbox, '_observation_queue') or not sandbox._observation_queue:
+             logger.warning("Provided MentisSandbox instance missing observation_queue, attempting to add one.")
+             sandbox._observation_queue = queue.Queue()
+        return sandbox
+    else:
+        logger.info("No sandbox provided, creating embedded sandbox with queue for LangGraph tool.")
+        obs_queue = queue.Queue()
+        try:
+            embedded_sandbox_wrapper = EmbeddedMentisSandbox(observation_queue=obs_queue)
+            if hasattr(embedded_sandbox_wrapper, 'sandbox') and isinstance(embedded_sandbox_wrapper.sandbox, MentisSandbox):
+                 # Ensure the queue is set on the actual sandbox instance if the wrapper holds it
+                 if not embedded_sandbox_wrapper.sandbox._observation_queue:
+                     embedded_sandbox_wrapper.sandbox._observation_queue = obs_queue
+                 return embedded_sandbox_wrapper.sandbox
+            elif isinstance(embedded_sandbox_wrapper, MentisSandbox):
+                 return embedded_sandbox_wrapper
             else:
-                raise TypeError(f"不支持的工具类型: {type(tool)}")
-        
-        return ToolNode(tools=tool_definitions, llm=llm, tool_executor=tool_executor)
+                 raise TypeError("EmbeddedMentisSandbox did not provide a valid MentisSandbox instance.")
+        except Exception as e:
+            logger.error(f"Failed to create embedded sandbox: {e}", exc_info=True)
+            raise RuntimeError(f"Could not create or obtain a MentisSandbox: {e}")
+
+
+# --- Input Schemas ---
+class MentisPythonToolInput(BaseModel):
+    """Input schema for MentisPythonTool."""
+    code: str = Field(description="The Python code to execute in the sandbox.")
+
+class MentisShellToolInput(BaseModel):
+    """Input schema for MentisShellTool."""
+    command: str = Field(description="The shell command to execute in the sandbox.")
+    work_dir: Optional[str] = Field(None, description="Optional working directory for the command.")
+
+
+# --- Mentis Python Tool ---
+class MentisPythonTool(BaseTool):
+    """
+    Executes Python code within a secure Mentis Sandbox environment.
+    """
+    name: str = "mentis_python_executor"
+    description: str = (
+        "Executes Python code in a secure, isolated sandbox environment. "
+        "Input MUST be a JSON object with a 'code' key containing the Python code string. "
+        "Use 'print()' to output results. Returns a string containing the execution result (stdout/stderr)."
+    )
+    args_schema: Type[BaseModel] = MentisPythonToolInput
+
+    # Use PrivateAttr for internal state not part of the schema
+    _sandbox: Optional[MentisSandbox] = PrivateAttr(default=None)
+    _owns_sandbox: bool = PrivateAttr(default=False)
+    # sync_timeout is a configuration field, so keep Field()
+    sync_timeout: float = Field(default=60.0) 
+
+    def __init__(self, sandbox: Optional[MentisSandbox] = None, sync_timeout: float = 60.0, **kwargs):
+        super().__init__(**kwargs) # Call super().__init__ first
+        try:
+            # Initialize private attributes directly
+            self._sandbox = _ensure_sandbox_with_queue(sandbox)
+            self._owns_sandbox = sandbox is None
+            # sync_timeout is handled by Pydantic/BaseTool initialization if passed via kwargs
+            # If passed directly, assign it. BaseTool might handle this automatically.
+            # Let's explicitly assign it for clarity if it's a direct arg.
+            self.sync_timeout = sync_timeout 
+        except Exception as e:
+            logger.error(f"Failed to initialize MentisPythonTool sandbox: {e}", exc_info=True)
+            self._sandbox = None # Ensure sandbox is None if init fails
+
+    def _run(self, code: str) -> str:
+        """Execute Python code synchronously."""
+        logger.debug(f"Executing Python code (sync timeout: {self.sync_timeout}s): {code[:100]}...")
+        if not self._sandbox:
+             return "Error: Mentis Sandbox is not available (failed during initialization)."
+        try:
+            result = self._sandbox.execute_ipython_cell_sync(code=code, timeout=self.sync_timeout)
+            logger.debug(f"Python execution result:\n{result}")
+            return str(result) if result is not None else "Execution finished with no output."
+        except Exception as e:
+            logger.error(f"Error executing Python code via tool: {e}", exc_info=True)
+            tb_str = traceback.format_exc()
+            # Escape newlines for the final string
+            escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r') # Also escape carriage returns
+            return f"Error executing code: {type(e).__name__}: {e}\n{escaped_tb}"
+
+    async def _arun(self, code: str) -> str:
+        """Execute Python code asynchronously."""
+        logger.debug(f"Executing Python code asynchronously (timeout: {self.sync_timeout}s): {code[:100]}...")
+        if not self._sandbox:
+             return "Error: Mentis Sandbox is not available (failed during initialization)."
+             
+        if hasattr(self._sandbox, 'execute_ipython_cell_async'):
+            try:
+                result = await self._sandbox.execute_ipython_cell_async(code=code, timeout=self.sync_timeout)
+                logger.debug(f"Async Python execution result:\n{result}")
+                return str(result) if result is not None else "Execution finished with no output."
+            except Exception as e:
+                logger.error(f"Error executing async Python code via tool: {e}", exc_info=True)
+                tb_str = traceback.format_exc()
+                # Escape newlines for the final string
+                escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r')
+                return f"Error executing async code: {type(e).__name__}: {e}\n{escaped_tb}"
+        else:
+            logger.warning("Async method not found on sandbox, running sync method in executor.")
+            try:
+                loop = asyncio.get_running_loop()
+                sync_run_with_args = functools.partial(self._run, code=code)
+                result = await loop.run_in_executor(None, sync_run_with_args)
+                return result
+            except Exception as e:
+                logger.error(f"Error running sync Python code in executor: {e}", exc_info=True)
+                tb_str = traceback.format_exc()
+                # Escape newlines for the final string
+                escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r')
+                return f"Error in async wrapper: {type(e).__name__}: {e}\n{escaped_tb}"
+
+    def close(self):
+        """Clean up resources, especially if the tool owns the sandbox."""
+        if self._owns_sandbox and self._sandbox:
+            logger.info("Closing owned Mentis Sandbox...")
+            try:
+                if hasattr(self._sandbox, 'delete'):
+                    self._sandbox.delete()
+                logger.info("Owned Mentis Sandbox closed.")
+            except Exception as e:
+                logger.error(f"Error closing owned Mentis Sandbox: {e}", exc_info=True)
+            finally:
+                self._sandbox = None
+
+    model_config = {
+        "arbitrary_types_allowed": True
+    }
+
+
+# --- Mentis Shell Tool ---
+class MentisShellTool(BaseTool):
+    """
+    Executes shell commands within a secure Mentis Sandbox environment.
+    """
+    name: str = "mentis_shell_executor"
+    description: str = (
+        "Executes shell commands in a secure, isolated sandbox environment. "
+        "Input MUST be a JSON object with a 'command' key containing the shell command string. "
+        "Optionally include 'work_dir' for the working directory. "
+        "Returns a string containing the execution result (stdout/stderr)."
+    )
+    args_schema: Type[BaseModel] = MentisShellToolInput
+
+    # Use PrivateAttr for internal state
+    _sandbox: Optional[MentisSandbox] = PrivateAttr(default=None)
+    _owns_sandbox: bool = PrivateAttr(default=False)
+    # sync_timeout is configuration
+    sync_timeout: float = Field(default=60.0)
+
+    def __init__(self, sandbox: Optional[MentisSandbox] = None, sync_timeout: float = 60.0, **kwargs):
+        super().__init__(**kwargs) # Call super().__init__ first
+        try:
+            # Initialize private attributes directly
+            self._sandbox = _ensure_sandbox_with_queue(sandbox)
+            self._owns_sandbox = sandbox is None
+            # Explicitly assign sync_timeout for clarity
+            self.sync_timeout = sync_timeout
+        except Exception as e:
+            logger.error(f"Failed to initialize MentisShellTool sandbox: {e}", exc_info=True)
+            self._sandbox = None # Ensure sandbox is None if init fails
+
+    def _run(self, command: str, work_dir: Optional[str] = None) -> str:
+        """Execute shell command synchronously."""
+        logger.debug(f"Executing shell command (sync timeout: {self.sync_timeout}s, work_dir: {work_dir}): {command}")
+        if not self._sandbox:
+             return "Error: Mentis Sandbox is not available (failed during initialization)."
+        try:
+            result = self._sandbox.execute_shell_command_sync(
+                command=command,
+                work_dir=work_dir,
+                timeout=self.sync_timeout
+            )
+            logger.debug(f"Shell execution result:\n{result}")
+            return str(result) if result is not None else "Execution finished with no output."
+        except Exception as e:
+            logger.error(f"Error executing shell command via tool: {e}", exc_info=True)
+            tb_str = traceback.format_exc()
+            # Escape newlines for the final string
+            escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r')
+            return f"Error executing command: {type(e).__name__}: {e}\n{escaped_tb}"
+
+    async def _arun(self, command: str, work_dir: Optional[str] = None) -> str:
+        """Execute shell command asynchronously."""
+        logger.debug(f"Executing shell command asynchronously (timeout: {self.sync_timeout}s, work_dir: {work_dir}): {command}")
+        if not self._sandbox:
+             return "Error: Mentis Sandbox is not available (failed during initialization)."
+             
+        if hasattr(self._sandbox, 'execute_shell_command_async'):
+             try:
+                 result = await self._sandbox.execute_shell_command_async(
+                     command=command,
+                     work_dir=work_dir,
+                     timeout=self.sync_timeout
+                 )
+                 logger.debug(f"Async Shell execution result:\n{result}")
+                 return str(result) if result is not None else "Execution finished with no output."
+             except Exception as e:
+                 logger.error(f"Error executing async shell command via tool: {e}", exc_info=True)
+                 tb_str = traceback.format_exc()
+                 # Escape newlines for the final string
+                 escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r')
+                 return f"Error executing async command: {type(e).__name__}: {e}\n{escaped_tb}"
+        else:
+            logger.warning("Async method not found on sandbox, running sync shell method in executor.")
+            try:
+                loop = asyncio.get_running_loop()
+                sync_run_with_args = functools.partial(self._run, command=command, work_dir=work_dir)
+                result = await loop.run_in_executor(None, sync_run_with_args)
+                return result
+            except Exception as e:
+                logger.error(f"Error running sync shell command in executor: {e}", exc_info=True)
+                tb_str = traceback.format_exc()
+                # Escape newlines for the final string
+                escaped_tb = tb_str.replace('\n', '\\n').replace('\r', '\\r')
+                return f"Error in async wrapper: {type(e).__name__}: {e}\n{escaped_tb}"
+
+    def close(self):
+        """Clean up resources."""
+        if self._owns_sandbox and self._sandbox:
+            logger.info("Closing owned Mentis Sandbox (Shell Tool)...")
+            try:
+                if hasattr(self._sandbox, 'delete'):
+                    self._sandbox.delete()
+                logger.info("Owned Mentis Sandbox closed (Shell Tool).")
+            except Exception as e:
+                logger.error(f"Error closing owned Mentis Sandbox (Shell Tool): {e}", exc_info=True)
+            finally:
+                self._sandbox = None
+
+    model_config = {
+        "arbitrary_types_allowed": True
+    }
+
+# Note: The ToolNode in langgraph expects a list of tools that are either
+# BaseTool instances or functions decorated with @tool.
+# Now that MentisPythonTool and MentisShellTool inherit from BaseTool,
+# they can be directly passed in a list to ToolNode.

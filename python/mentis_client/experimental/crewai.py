@@ -1,4 +1,6 @@
 # mentis_client/experimental/crewai.py
+import logging
+import queue
 from typing import Type, Optional
 from pydantic import BaseModel, Field
 
@@ -18,8 +20,27 @@ except ImportError:
         def _run(self, *args, **kwargs):
             raise NotImplementedError("crewai未安装，无法使用此工具")
 
-from mentis_client.client import MentisSandbox, collect_observations
+from mentis_client.client import MentisSandbox
 from ..embedded import EmbeddedMentisSandbox
+
+logger = logging.getLogger(__name__)
+
+# --- Helper to ensure sandbox has a queue --- 
+def _ensure_sandbox_with_queue(sandbox: Optional[MentisSandbox]) -> MentisSandbox:
+    """Ensures a sandbox instance exists and has an observation queue."""
+    if sandbox:
+        if not sandbox._observation_queue:
+            # If a sandbox is provided, it *must* have a queue configured
+            raise ValueError("Provided MentisSandbox instance must be initialized with an observation_queue.")
+        return sandbox
+    else:
+        # Create an embedded sandbox with a queue
+        logger.info("No sandbox provided, creating embedded sandbox with queue for CrewAI tool.")
+        # Need to create queue here as EmbeddedMentisSandbox passes kwargs
+        obs_queue = queue.Queue()
+        embedded_sandbox_wrapper = EmbeddedMentisSandbox(observation_queue=obs_queue)
+        # The wrapper's __enter__ returns the actual MentisSandbox instance
+        return embedded_sandbox_wrapper.sandbox 
 
 
 class MentisIPythonToolArgs(BaseModel):
@@ -34,33 +55,35 @@ class MentisIPythonTool(BaseTool):
     description: str = "在安全的沙箱环境中运行Python代码和shell命令。Shell命令应该在新行上并以'!'开头。"
     args_schema: Type[BaseModel] = MentisIPythonToolArgs
 
-    def __init__(self, sandbox: Optional[MentisSandbox] = None, *args, **kwargs):
+    def __init__(self, sandbox: Optional[MentisSandbox] = None, sync_timeout: float = 60.0, *args, **kwargs):
         """
         初始化工具。
         
         Args:
             sandbox: 现有的MentisSandbox实例。如果未提供，将创建一个嵌入式沙箱。
+            sync_timeout: 等待同步执行结果的最长时间（秒）。
             *args, **kwargs: 传递给BaseTool的其他参数。
         """
         super().__init__(*args, **kwargs)
-        # 如果未提供沙箱，则创建一个嵌入式沙箱
-        # 注意：沙箱只有在Python程序退出时才会关闭
-        self._sandbox = sandbox or EmbeddedMentisSandbox().sandbox
-        self._owns_sandbox = sandbox is None  # 跟踪我们是否创建了沙箱
+        self._sandbox = _ensure_sandbox_with_queue(sandbox)
+        self._owns_sandbox = sandbox is None
+        self._sync_timeout = sync_timeout
+        # No need for self._obs_queue anymore, it's managed by the sandbox instance
 
-    def _run(self, code: str) -> str:
-        """Run Python code in the sandbox and return the result."""
-        action_id = self._sandbox.run_ipython_cell(code)
-        observations = collect_observations(self._obs_queue, action_id)
-        return "".join([obs.line for obs in observations if hasattr(obs, 'line')])
-    
-    def __del__(self):
-        """在对象被垃圾回收时清理资源"""
-        if hasattr(self, '_owns_sandbox') and self._owns_sandbox and hasattr(self, '_sandbox'):
-            try:
-                self._sandbox.delete()
-            except Exception:
-                pass  # 忽略清理错误
+    def _run(self, code: str, timeout: Optional[int] = None) -> str:
+        """Run Python code in the sandbox synchronously and return the result."""
+        # Note: the 'timeout' arg from the schema is passed to the server-side execution limit
+        # The self._sync_timeout is used for the client-side wait.
+        logger.debug(f"CrewAI Tool executing IPython code (sync timeout: {self._sync_timeout}s): {code[:100]}...")
+        try:
+            # Use the new synchronous method. The server-side timeout is handled by run_ipython_cell if needed.
+            # We primarily rely on the client-side _wait_for_action_results timeout.
+            result = self._sandbox.execute_ipython_cell_sync(code=code, timeout=self._sync_timeout)
+            logger.debug(f"CrewAI Tool IPython execution result:\n{result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error executing code via CrewAI tool: {e}", exc_info=True)
+            return f"Error executing code: {e}"
 
 
 class MentisShellToolArgs(BaseModel):
@@ -76,38 +99,46 @@ class MentisShellTool(BaseTool):
     description: str = "在安全的沙箱环境中运行bash shell命令。"
     args_schema: Type[BaseModel] = MentisShellToolArgs
 
-    def __init__(self, sandbox: Optional[MentisSandbox] = None, *args, **kwargs):
+    def __init__(self, sandbox: Optional[MentisSandbox] = None, sync_timeout: float = 60.0, *args, **kwargs):
         """
         初始化工具。
         
         Args:
             sandbox: 现有的MentisSandbox实例。如果未提供，将创建一个嵌入式沙箱。
+            sync_timeout: 等待同步执行结果的最长时间（秒）。
             *args, **kwargs: 传递给BaseTool的其他参数。
         """
         super().__init__(*args, **kwargs)
-        # 如果未提供沙箱，则创建一个嵌入式沙箱
-        self._sandbox = sandbox or EmbeddedMentisSandbox().sandbox
-        self._owns_sandbox = sandbox is None  # 跟踪我们是否创建了沙箱
+        self._sandbox = _ensure_sandbox_with_queue(sandbox)
+        self._owns_sandbox = sandbox is None
+        self._sync_timeout = sync_timeout
 
     def _run(self, command: str, timeout: Optional[int] = None, work_dir: Optional[str] = None) -> str:
         """
-        在沙箱中执行Shell命令。
+        Run a shell command in the sandbox synchronously and return the result.
         
         Args:
-            command: 要执行的Shell命令。
-            timeout: 可选的执行超时时间（秒）。
-            work_dir: 可选的工作目录。
+            command: The shell command to execute.
+            timeout: Optional server-side execution timeout (seconds).
+            work_dir: Optional working directory.
             
         Returns:
-            str: 执行结果。
+            str: Execution result (stdout, stderr, errors).
         """
-        result = self._sandbox.run_shell_command(command, timeout=timeout, work_dir=work_dir)
-        return result
-    
-    def __del__(self):
-        """在对象被垃圾回收时清理资源"""
-        if hasattr(self, '_owns_sandbox') and self._owns_sandbox and hasattr(self, '_sandbox'):
-            try:
-                self._sandbox.delete()
-            except Exception:
-                pass  # 忽略清理错误
+        logger.debug(f"CrewAI Tool executing shell command (sync timeout: {self._sync_timeout}s): {command}")
+        try:
+            # Use the new synchronous method.
+            # Pass the schema's timeout to the server-side limit if provided.
+            result = self._sandbox.execute_shell_command_sync(
+                command=command,
+                work_dir=work_dir,
+                timeout=self._sync_timeout, # Client-side wait timeout
+                # The server-side timeout is passed via run_shell_command inside execute_shell_command_sync if needed, 
+                # but the primary control here is the client wait timeout.
+                # Consider if the API should expose both distinctly.
+            )
+            logger.debug(f"CrewAI Tool Shell execution result:\n{result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error executing command via CrewAI tool: {e}", exc_info=True)
+            return f"Error executing command: {e}"
