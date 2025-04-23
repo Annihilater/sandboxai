@@ -436,8 +436,99 @@ class ConcurrentTask:
         self.logger.warning(f"Timeout ({timeout}s) waiting for 'end' observation for action {self.action_id}. Returning {len(observations)} partial results collected.")
         return observations
 
+# --- Concurrent Test Case (Modified to use Shell) ---
+def test_shell_concurrent_execution(sandbox_session):
+    """测试并发执行 (修改为使用 Shell 命令以避免 IPython 内核状态问题)"""
+    sandbox, obs_queue = sandbox_session
+    NUM_TASKS = 3
+    logger.info(f"Running test_concurrent_execution with {NUM_TASKS} shell tasks...")
+
+    tasks = [ConcurrentTask(sandbox, i) for i in range(NUM_TASKS)]
+
+    print() # Formatting
+    # --- 修改: 使用 run_shell_command ---
+    for i, task in enumerate(tasks):
+        # 使用简单且独立的 Shell 命令
+        command = f"echo 'Task {i} executing'; sleep 0.5; echo 'Task {i} finished'"
+        # 调用 run_shell_command 而不是 run_ipython_cell
+        action_id = sandbox.run_shell_command(command)
+        # task.execute 方法也需要相应修改或直接调用 run_shell_command
+        task.action_id = action_id # 直接设置 action_id
+        logger.info(f"Launched Shell Task {i}, action_id: {action_id}")
+        time.sleep(0.05) # 轻微延迟避免瞬间峰值
+
+    wait_time = 5.0 # 等待时间可能需要根据实际情况调整
+    logger.info(f"Waiting {wait_time}s for shell tasks to potentially complete...")
+    time.sleep(wait_time)
+    logger.info("Finished waiting. Collecting results...")
+
+    results = {}
+    print("\nCollecting and printing results...")
+    all_passed = True
+    for i, task in enumerate(tasks):
+        print(f"\n--- Collecting for Task {i} (action_id: {task.action_id}) ---")
+        # 使用 ConcurrentTask 中的 collect_results (它等待 'end')
+        collection_timeout = TEST_TIMEOUT - wait_time - 1 if TEST_TIMEOUT > wait_time + 1 else 10.0
+        observations = task.collect_results(obs_queue, timeout=collection_timeout)
+        stdout = ""
+        stderr = ""
+        result_exit_code = None
+        end_obs_found = False
+
+        for obs in observations:
+            # (可选) 打印原始观测数据
+            # print(f"Task {i} Raw Obs - Type: {getattr(obs, 'observation_type', 'N/A')}...")
+            if getattr(obs, 'observation_type', None) == "stream":
+                if getattr(obs, 'stream', None) == "stdout":
+                    # Shell 命令输出的 line 可能不带换行，如果需要按行处理需添加
+                    stdout += getattr(obs, 'line', '') + "\n"
+                elif getattr(obs, 'stream', None) == "stderr":
+                     stderr += getattr(obs, 'line', '') + "\n"
+            elif getattr(obs, 'observation_type', None) == "result":
+                 result_exit_code = getattr(obs, 'exit_code', None)
+            elif getattr(obs, 'observation_type', None) == "end":
+                 end_obs_found = True
+                 # end 观测也可能携带最终 exit_code
+                 if result_exit_code is None:
+                     result_exit_code = getattr(obs, 'exit_code', None)
+
+
+        results[i] = {"stdout": stdout.strip(), "stderr": stderr.strip(), "exit_code": result_exit_code, "obs_count": len(observations), "end_found": end_obs_found}
+
+        print("\n--- Aggregated Results ---")
+        all_passed = True
+        # Iterate through the collected results using the keys (task index 'i')
+        for task_id_index, result_data_dict in results.items(): # Use clear variable names
+            # Use task_id_index and result_data_dict here consistently
+            print(f"\n--- Verifying Task {task_id_index} ---")
+            print(f"Task {task_id_index}:")
+            print(f"  Observations Collected: {result_data_dict['obs_count']}") # Use result_data_dict
+            print(f"  'end' Observation Received: {result_data_dict['end_found']}")
+            print(f"  Exit Code: {result_data_dict['exit_code']}")
+            print(f"  STDOUT:\n>>>\n{result_data_dict['stdout']}\n<<<")
+            print(f"  STDERR:\n>>>\n{result_data_dict['stderr']}\n<<<")
+            print("---")
+            try:
+                expected_start = f'Task {task_id_index} executing' # Use task_id_index
+                expected_end = f'Task {task_id_index} finished'
+                assert result_data_dict['end_found'], f"Task {task_id_index} did not receive 'end' observation"
+                assert result_data_dict['exit_code'] == 0, f"Task {task_id_index} had non-zero exit code: {result_data_dict['exit_code']}"
+                # Assert based on the corrected dictionary variable
+                assert expected_start in result_data_dict['stdout'], f"Expected start string '{expected_start}' not found in Task {task_id_index} stdout"
+                assert expected_end in result_data_dict['stdout'], f"Expected end string '{expected_end}' not found in Task {task_id_index} stdout"
+                logger.info(f"Task {task_id_index}: Checks PASSED") # Use task_id_index
+            except AssertionError as e:
+                logger.warning(f"Task {task_id_index}: FAILED Checks - {e}") # Use task_id_index
+                all_passed = False
+
+        assert all_passed, "One or more concurrent shell tasks failed their checks."
+
+# 注意: ConcurrentTask 类中的 execute 方法原本是调用 run_ipython_cell，
+# 如果你修改测试用例直接调用 sandbox.run_shell_command，
+# 就不需要修改 ConcurrentTask 类了。上面的示例直接调用了 run_shell_command。
+
 # --- Concurrent Test Case (Known Issues with shared IPython state) ---
-def test_concurrent_execution(sandbox_session):
+def test_ipython_concurrent_execution(sandbox_session):
     """测试并发执行 (已知问题: 共享 IPython 内核可能导致输出混乱)"""
     sandbox, obs_queue = sandbox_session
     NUM_TASKS = 3
