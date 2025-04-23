@@ -1,6 +1,6 @@
 # MentisSandbox
 
-MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环境，旨在为 AI Agent（特别是基于 LangGraph 构建的 Agent）提供可靠的执行后端。它使用 Docker 容器提供安全隔离，同时通过 WebSocket 实现实时通信，让 AI Agent 能够获取命令执行的即时反馈。
+MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环境，旨在为 AI Agent（特别是基于 LangGraph 或 CrewAI 构建的 Agent）提供可靠的执行后端。它使用 Docker 容器提供安全隔离，同时通过 WebSocket 实现实时通信，让 AI Agent 能够获取命令执行的即时反馈。
 
 ## 功能特点
 
@@ -10,13 +10,13 @@ MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环
 - 以非 root 用户运行内部进程
 
 ### 持久性
-- 每个沙箱会话拥有持久化的文件系统 (`/work`)
-- 支持长期运行的 Agent 会话
+- 每个沙箱会话拥有持久化的文件系统 (`/work` 作为默认工作目录)
+- 支持长期运行的 Agent 会话，IPython 内核状态在同一沙箱的**顺序**调用中保持
 
 ### 实时交互
-- **Shell 命令执行**：安全执行 Shell 命令并获取实时反馈
-- **IPython 代码执行**：在持久化的 IPython 环境中运行代码
-- **WebSocket 实时通信**：获取命令执行过程中的流式输出和状态更新
+- **Shell 命令执行**：安全、**并发**地执行 Shell 命令并获取实时反馈。
+- **IPython 代码执行**：在持久化的 IPython 环境中**顺序**执行代码（同一沙箱内的并发请求将排队），保持会话状态。
+- **WebSocket 实时通信**：获取命令执行过程中的流式输出和状态更新。
 
 ### 多租户与组织 (Spaces)
 - **Spaces**: 提供逻辑隔离层，允许将沙箱分组管理。每个沙箱都属于一个 Space。
@@ -30,29 +30,29 @@ MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环
 
 ### 前置要求
 
-- Go 1.22+
-- Docker
-- Make (可选，用于构建脚本)
-- WebSocket 客户端 (例如 `websocat`，用于测试)
-- curl (用于 API 请求)
-- Python 3.8+ (用于使用 Python 客户端)
+- Go 1.22+ 
+- Docker 
+- Make (可选，用于构建脚本) 
+- WebSocket 客户端 (例如 `websocat`，用于测试) 
+- curl (用于 API 请求) 
+- Python 3.8+ (用于使用 Python 客户端) 
 
 ### 构建与启动
 
-1.  **克隆代码库**
+1.  **克隆代码库** 
 
     ```bash
-    git clone https://github.com/yourusername/sandboxai.git # 请替换为实际仓库地址
+    git clone [https://github.com/yourusername/sandboxai.git](https://github.com/yourusername/sandboxai.git) # 请替换为实际仓库地址
     cd sandboxai
     ```
 
-2.  **构建 Docker 镜像** (包含 MentisExecutor)
+2.  **构建 Docker 镜像** (包含 MentisExecutor) 
 
     ```bash
     make build-box-image
     ```
 
-3.  **启动 MentisRuntime 服务**
+3.  **启动 MentisRuntime 服务** 
 
     有两种方式启动服务器：
 
@@ -69,17 +69,19 @@ MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环
 
     服务默认监听在 `127.0.0.1:5266`。
 
-4. **安装 Python 客户端**
+4. **安装 Python 客户端** 
 
     ```bash
-    pip install mentis-client
+    # 假设你的包已经可以安装
+    pip install -e .
+    # 或者 pip install mentis-client (如果已发布)
     ```
 
 ## 快速开始
 
 ### 使用 Python 客户端
 
-MentisSandbox 提供了 Python 客户端库，支持两种使用模式：
+MentisSandbox 提供了 Python 客户端库 (`mentis_client`)，支持两种使用模式：
 
 #### 1. 连接模式
 
@@ -88,88 +90,150 @@ MentisSandbox 提供了 Python 客户端库，支持两种使用模式：
 ```python
 from mentis_client.client import MentisSandbox
 import queue
+import time # 引入 time
 
 # 创建观察队列
 obs_queue = queue.Queue()
 
-# 连接到服务器
-with MentisSandbox.create(
-    base_url="http://localhost:5266",
-    observation_queue=obs_queue,
-    space_id="default"
-) as sandbox:
-    # 执行 Python 代码
-    action_id = sandbox.run_ipython_cell("print('Hello, World!')")
-    
-    # 等待并收集结果
-    while True:
-        obs = obs_queue.get()
-        if obs.action_id == action_id:
-            if obs.observation_type == "stream":
-                print(obs.line, end="")
-            elif obs.observation_type == "end":
-                break
+# 连接到服务器并创建沙箱
+# 使用 try...finally 确保沙箱被删除
+sandbox = None
+try:
+    # 确保 Runtime 服务正在运行
+    sandbox = MentisSandbox.create(
+        base_url="http://localhost:5266", # 确保 URL 正确
+        observation_queue=obs_queue,
+        space_id="default" # 使用 default space
+    )
+    print(f"沙箱已创建: {sandbox.sandbox_id}")
+    # 等待 WebSocket 连接稳定 (如果需要)
+    time.sleep(1)
+
+    # --- 执行 Python 代码 ---
+    code_to_run = "var = 'World'; print(f'Hello, {var}!')"
+    print(f"\n执行 IPython: {code_to_run}")
+    action_id_py = sandbox.run_ipython_cell(code_to_run)
+    print(f"IPython Action ID: {action_id_py}")
+
+    # --- 健壮地等待并收集结果 (直到 'end') ---
+    print("等待 IPython 结果...")
+    ipython_observations = []
+    ipython_stdout = ""
+    start_time = time.time()
+    while time.time() - start_time < 30.0: # 增加超时
+        try:
+            obs = obs_queue.get(timeout=1.0) # 使用带超时的 get
+            if getattr(obs, 'action_id', None) == action_id_py:
+                print(f"  收到观测: {getattr(obs, 'observation_type', 'Unknown')}")
+                ipython_observations.append(obs)
+                if getattr(obs, 'observation_type', None) == "stream" and getattr(obs, 'stream', None) == "stdout":
+                    ipython_stdout += getattr(obs, 'line', '')
+                if getattr(obs, 'observation_type', None) == "end":
+                    print("  收到 'end' 信号")
+                    break # 收到 end 后退出循环
+        except queue.Empty:
+            print("  队列暂时为空...")
+            continue # 继续等待
+
+    print("\nIPython 执行完成。")
+    print(f"收到的观测数量: {len(ipython_observations)}")
+    print(f"STDOUT:\n{ipython_stdout.strip()}")
+    # 可以在这里添加对 exit_code 的检查
+
+    # --- 执行 Shell 命令 ---
+    command_to_run = "echo 'Hello from Shell' && ls /work"
+    print(f"\n执行 Shell: {command_to_run}")
+    action_id_sh = sandbox.run_shell_command(command_to_run)
+    print(f"Shell Action ID: {action_id_sh}")
+
+    # --- 健壮地等待并收集结果 (直到 'end') ---
+    print("等待 Shell 结果...")
+    shell_observations = []
+    shell_stdout = ""
+    start_time = time.time()
+    while time.time() - start_time < 30.0: # 增加超时
+        try:
+            obs = obs_queue.get(timeout=1.0)
+            if getattr(obs, 'action_id', None) == action_id_sh:
+                print(f"  收到观测: {getattr(obs, 'observation_type', 'Unknown')}")
+                shell_observations.append(obs)
+                if getattr(obs, 'observation_type', None) == "stream" and getattr(obs, 'stream', None) == "stdout":
+                    # Shell 输出是按行来的，我们拼接起来
+                    shell_stdout += getattr(obs, 'line', '') + '\n'
+                if getattr(obs, 'observation_type', None) == "end":
+                    print("  收到 'end' 信号")
+                    break
+        except queue.Empty:
+            print("  队列暂时为空...")
+            continue
+
+    print("\nShell 执行完成。")
+    print(f"收到的观测数量: {len(shell_observations)}")
+    print(f"STDOUT:\n{shell_stdout.strip()}")
+    # 可以在这里添加对 exit_code 的检查
+
+except Exception as e:
+    print(f"发生错误: {e}")
+finally:
+    if sandbox:
+        print(f"\n删除沙箱: {sandbox.sandbox_id}")
+        sandbox.delete() # delete() 方法会处理连接关闭
+
 ```
 
 #### 2. 嵌入式模式
 
-自动管理服务器进程，无需手动启动：
+自动管理 Runtime 服务器进程，无需手动启动（**注意:** 不能与已运行的独立 Runtime 同时使用默认端口）：
 
 ```python
 from mentis_client.embedded import EmbeddedMentisSandbox
 import queue
+import time
 
 # 创建观察队列
 obs_queue = queue.Queue()
 
-# 使用嵌入式模式
-with EmbeddedMentisSandbox(
-    observation_queue=obs_queue,
-    space_id="default"
-) as sandbox:
-    # 执行 Python 代码
-    action_id = sandbox.run_ipython_cell("print('Hello, World!')")
-    
-    # 等待并收集结果
-    while True:
-        obs = obs_queue.get()
-        if obs.action_id == action_id:
-            if obs.observation_type == "stream":
-                print(obs.line, end="")
-            elif obs.observation_type == "end":
-                break
+# 使用嵌入式模式 (确保没有其他服务监听默认端口，或指定不同端口)
+try:
+    with EmbeddedMentisSandbox(
+        observation_queue=obs_queue,
+        space_id="default" # 假设使用默认 space
+        # port=5267 # 可以指定不同端口避免冲突
+    ) as sandbox:
+        print(f"嵌入式沙箱已创建并连接: {sandbox.sandbox_id}")
+        # 执行 Python 代码
+        action_id = sandbox.run_ipython_cell("print('Hello from Embedded Mode!')")
+        print(f"IPython Action ID: {action_id}")
+
+        # 等待并收集结果 (使用健壮逻辑)
+        print("等待结果...")
+        stdout = ""
+        start_time = time.time()
+        while time.time() - start_time < 30.0:
+            try:
+                obs = obs_queue.get(timeout=1.0)
+                if getattr(obs, 'action_id', None) == action_id:
+                    print(f"  收到观测: {getattr(obs, 'observation_type', 'Unknown')}")
+                    if getattr(obs, 'observation_type', None) == "stream" and getattr(obs, 'stream', None) == "stdout":
+                        stdout += getattr(obs, 'line', '')
+                    if getattr(obs, 'observation_type', None) == "end":
+                        print("  收到 'end' 信号")
+                        break
+            except queue.Empty:
+                continue
+
+        print("\n执行完成。")
+        print(f"STDOUT:\n{stdout.strip()}")
+
+except Exception as e:
+    print(f"嵌入式模式出错: {e}")
+
+# 嵌入式服务器会在程序退出时自动停止 (通过 atexit)
 ```
 
-#### 3. LangGraph 集成
+#### 3. LangGraph / CrewAI 集成
 
-MentisSandbox 提供了与 LangGraph 框架的集成支持：
-
-```python
-from mentis_client.experimental.langgraph import MentisPythonTool
-from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage, AIMessage
-
-# 创建 MentisPythonTool
-sandbox = MentisSandbox.create(base_url="http://localhost:5266")
-python_tool = MentisPythonTool(sandbox=sandbox)
-
-# 构建 LangGraph
-graph = StateGraph(AgentState)
-graph.add_node("agent", agent_node)
-graph.add_node("sandbox_tool", ToolNode([python_tool]))
-graph.set_entry_point("agent")
-graph.add_conditional_edges(
-    "agent",
-    should_continue,
-    {
-        "sandbox_tool": "sandbox_tool",
-        END: END
-    }
-)
-graph.add_edge("sandbox_tool", "agent")
-```
-
-更多示例请查看 `python/examples` 目录。
+MentisSandbox 提供了实验性的 LangGraph 和 CrewAI 工具集成。请参阅 `experimental/README.md` 获取详细用法。
 
 ### 使用 HTTP API (原始方式)
 
@@ -251,18 +315,19 @@ MentisSandbox 提供了一个全面的测试脚本 `test/test_sandbox.sh`，它�
 
 MentisSandbox 由两个主要组件构成：
 
-1.  **MentisRuntime** (Go)：
-    *   管理 Docker 容器 (Sandboxes) 的生命周期。
-    *   管理 Spaces，提供逻辑分组。
-    *   提供 REST API 接口用于管理 Spaces 和 Sandboxes，以及执行命令。
-    *   管理 WebSocket 连接和消息广播，实现实时反馈。
-    *   处理命令执行请求并将其分发给对应的 MentisExecutor。
+1.  **MentisRuntime** (Go)：(职责描述保持不变) [cite: 1]
+    * 管理 Docker 容器 (Sandboxes) 的生命周期。
+    * 管理 Spaces，提供逻辑分组。
+    * 提供 REST API 接口用于管理 Spaces 和 Sandboxes，以及执行命令。
+    * 管理 WebSocket 连接和消息广播，实现实时反馈。
+    * 处理命令执行请求并将其分发给对应的 MentisExecutor。
 
-2.  **MentisExecutor** (Python)：
-    *   运行在每个 Docker 容器 (Sandbox) 内。
-    *   监听来自 MentisRuntime 的命令执行请求 (通过内部 HTTP API)。
-    *   执行 Shell 命令和 IPython 代码。
-    *   将执行过程中的输出 (stdout/stderr) 和最终结果实时推送回 MentisRuntime (通过内部 HTTP API)。
+2.  **MentisExecutor** (Python)：(更新描述) [cite: 1]
+    * 运行在每个 Docker 容器 (Sandbox) 内。
+    * 监听来自 MentisRuntime 的命令执行请求 (通过内部 HTTP API)。
+    * 执行 Shell 命令（可并发）。
+    * **通过加锁机制顺序执行** 同一个沙箱内的 IPython 代码请求，保证状态一致性。
+    * 将执行过程中的输出 (stdout/stderr) 和最终结果（包括结构化错误信息）实时推送回 MentisRuntime (通过内部 HTTP API)。
 
 ### 数据流架构
 
@@ -322,6 +387,17 @@ sequenceDiagram
     Runtime->>-Client: 13. HTTP 202 Accepted (含 action_id) [此响应在步骤2之后立即返回]
 
 ```
+## 并发处理设计
+
+MentisSandbox 在处理并发请求时采用以下策略，以兼顾性能和状态一致性：
+
+* **Shell 命令 (`run_shell_command`)**: 完全支持并发执行。来自不同客户端或同一客户端的多个 Shell 命令请求（即使是针对同一个 Sandbox）可以并行处理和执行，因为 Shell 命令通常是无状态的。
+* **IPython 代码 (`run_ipython_cell`)**:
+    * **不同 Sandbox 之间**: 来自不同客户端或同一客户端针对**不同** Sandbox 实例的 IPython 请求可以完全并发执行。
+    * **同一个 Sandbox 之内**: 为了保证 IPython 内核的状态持久性和一致性（例如，在一个单元格中定义的变量可以在下一个单元格中使用），对**同一个** Sandbox 实例的多个 `run_ipython_cell` 请求会**强制按顺序执行**。Executor 内部使用了锁机制，确保一次只有一个 IPython 单元格在给定的 Sandbox 内核中运行。后续请求会自动排队等待。
+* **健壮性:** 这种设计显著提高了在并发场景下使用 IPython 的**健壮性**，有效避免了先前可能出现的输出内容混淆、状态污染和内核错误。
+
+这种设计旨在平衡用户对持久化、有状态环境的需求与系统处理并发请求的效率和稳定性。
 
 ## API 参考
 

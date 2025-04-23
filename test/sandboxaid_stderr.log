@@ -1,0 +1,8 @@
+{"time":"2025-04-23T23:56:39.945083+02:00","level":"INFO","msg":"Docker client initialized"}
+{"time":"2025-04-23T23:56:39.945192+02:00","level":"INFO","msg":"WebSocket hub started"}
+{"time":"2025-04-23T23:56:39.945203+02:00","level":"INFO","msg":"Default space created","component":"space-manager"}
+{"time":"2025-04-23T23:56:39.945206+02:00","level":"INFO","msg":"Space manager initialized"}
+{"time":"2025-04-23T23:56:39.945211+02:00","level":"INFO","msg":"Sandbox manager initialized"}
+{"time":"2025-04-23T23:56:39.945215+02:00","level":"INFO","msg":"API handler initialized"}
+{"time":"2025-04-23T23:56:39.945207+02:00","level":"INFO","msg":"WebSocket Hub started","component":"websocket-hub"}
+{"time":"2025-04-23T23:56:39.94542+02:00","level":"ERROR","msg":"Failed to listen","address":"127.0.0.1:5266","error":"listen tcp 127.0.0.1:5266: bind: address already in use"}

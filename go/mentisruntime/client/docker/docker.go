@@ -225,7 +225,7 @@ func (c *DockerClient) waitForHealthcheck(ctx context.Context, port int, interva
 }
 
 func (c *DockerClient) sendHealthcheck(ctx context.Context, port int) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/healthz", port), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/health", port), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
