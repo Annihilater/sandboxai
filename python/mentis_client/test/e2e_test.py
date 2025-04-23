@@ -549,7 +549,7 @@ print(f'Task {i} finished sleep')
         logger.info(f"Launched Task {i}, action_id: {action_id}")
         # time.sleep(0.05) # Small delay between launches if needed
 
-    wait_time = 5.0
+    wait_time = 10.0
     logger.info(f"Waiting {wait_time}s for tasks to potentially complete...")
     time.sleep(wait_time)
     logger.info("Finished waiting. Collecting results...")
@@ -558,7 +558,7 @@ print(f'Task {i} finished sleep')
     print("\nCollecting and printing results...") # Keep print for clarity
     for i, task in enumerate(tasks):
         print(f"\n--- Collecting for Task {i} (action_id: {task.action_id}) ---")
-        collection_timeout = TEST_TIMEOUT - wait_time - 1 if TEST_TIMEOUT > wait_time + 1 else 10.0
+        collection_timeout = 15.0
         observations = task.collect_results(obs_queue, timeout=collection_timeout)
         stdout = ""
         stderr = ""

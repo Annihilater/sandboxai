@@ -3,6 +3,8 @@ from fastapi import FastAPI, HTTPException, Response
 from IPython.core.interactiveshell import InteractiveShell
 from contextlib import redirect_stdout, redirect_stderr
 import json
+import threading
+import collections
 import subprocess
 import io
 import os
@@ -10,8 +12,6 @@ import requests
 import logging
 import traceback # Import traceback
 from datetime import datetime, timezone # Added for timestamp
-
-print("<<<<<< EXECUTOR CODE VERSION: TIMESTAMP_FIXED >>>>>>", flush=True)
 
 # Import Pydantic models from sandboxai library if possible,
 # otherwise define minimal ones here if needed for request validation/typing.
@@ -46,9 +46,12 @@ logging.basicConfig(level=logging.DEBUG, # <-- Set level to DEBUG
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mentis-executor")
 
+# 全局锁字典，为每个 sandbox_id 存储一个独立的线程锁
+# defaultdict 会在首次访问不存在的 key 时自动创建 Lock 对象
+ipython_locks = collections.defaultdict(threading.Lock)
 # Initialize FastAPI app
 app = FastAPI(
-    title="Mentis Executor",
+    title="Mentis Sandbox Executor",
     version="1.0",
     description="The server that runs python code and shell commands in a MentisSandbox environment.",
 )
@@ -89,157 +92,154 @@ def health():
     response_description="NDJSON stream of observations (stdout, stderr, result)",
     status_code=200, # Return 200 OK immediately
 )
-def run_ipython_cell(request: RunIPythonCellRequest):
+def run_ipython_cell(request: RunIPythonCellRequest): # 保持函数签名不变
     """
-    Execute code in an IPython kernel. Observations are pushed asynchronously
-    to the RUNTIME_OBSERVATION_URL.
-    Returns an immediate 200 OK if the request is accepted.
+    Execute code in an IPython kernel. Observations are pushed asynchronously.
+    IPython executions for the SAME sandbox_id are serialized by a lock.
     """
-    if ipy is None:
-        logger.error("IPython shell not initialized, cannot run cell.")
-        raise HTTPException(status_code=503, detail="IPython shell not available")
-
-    # --- Use correct action_id from request ---
-    action_id = request.action_id
-    # ---
-
+    # --- 获取 Sandbox ID ---
+    # 假设 sandbox_id 通过环境变量获取，和之前日志一致
     sandbox_id = os.environ.get('SANDBOX_ID')
-    runtime_observation_url = os.environ.get('RUNTIME_OBSERVATION_URL')
+    if not sandbox_id:
+        logger.error("SANDBOX_ID environment variable not set. Cannot acquire lock.")
+        raise HTTPException(status_code=500, detail="Internal configuration error: SANDBOX_ID missing.")
 
-    logger.info(f"[AGENT] Received IPython cell request. ActionID: {action_id}, SandboxID: {sandbox_id}")
+    action_id = request.action_id # 从请求中获取 action_id
+    runtime_observation_url = os.environ.get('RUNTIME_OBSERVATION_URL') # 获取观测 URL
 
-    if not runtime_observation_url:
-        logger.error("[AGENT] RUNTIME_OBSERVATION_URL environment variable not set. Cannot send observations.")
-        # Optionally raise error if this is critical
-    if action_id is None:
-         logger.warning("[AGENT] action_id not found in request. Observations cannot be correlated.")
-         # Optionally raise error if this is critical
+    logger.info(f"[AGENT] Received IPython cell request. ActionID: {action_id}, SandboxID: {sandbox_id}. Attempting to acquire lock...")
 
-    exit_code = 0
-    error_message = None
-    tb_lines = []
+    # --- 获取并使用特定于此 sandbox_id 的锁 ---
+    # defaultdict 会自动为新的 sandbox_id 创建 Lock
+    sandbox_lock = ipython_locks[sandbox_id]
 
-    try:
-        # Capture stdout and stderr separately
-        stdout_buf = io.StringIO()
-        stderr_buf = io.StringIO()
+    with sandbox_lock: # --- 关键：代码块开始，同一 sandbox 的其他 IPython 请求会在此等待 ---
+        logger.info(f"[AGENT] Lock acquired for SandboxID: {sandbox_id}, ActionID: {action_id}. Processing request...")
 
-        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-            exec_result = ipy.run_cell(request.code, store_history=True)
+        # V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V V
+        # --- 这里是你原来 run_ipython_cell 函数的核心逻辑 ---
+        # --- (包括检查 ipy 是否 None, try...except 块, ipy.run_cell, ---
+        # --- 处理 stdout/stderr, 发送所有相关的 send_observation 调用) ---
 
-        stdout = stdout_buf.getvalue()
-        stderr = stderr_buf.getvalue()
+        if ipy is None:
+            logger.error("IPython shell not initialized, cannot run cell.")
+            # 注意：在锁内部抛出异常通常是安全的，with 语句会确保锁被释放
+            raise HTTPException(status_code=503, detail="IPython shell not available")
 
-        logger.info(f"[AGENT] IPython execution finished. ActionID: {action_id}. Success: {exec_result.success}. Stdout: {len(stdout)} chars. Stderr: {len(stderr)} chars.")
+        exit_code = 0
+        error_name = None
+        error_value = None
+        formatted_tb = []
 
-        # --- Send Observations ---
-        if runtime_observation_url and action_id:
-            # Send stdout if any
-            if stdout:
-                send_observation(runtime_observation_url, {
-                    "observation_type": "stream", # Correct key
-                    "action_id": action_id,
-                    "stream": "stdout",
-                    "line": stdout
-                })
+        try:
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
 
-            # Send stderr if any
-            if stderr:
-                 send_observation(runtime_observation_url, {
-                    "observation_type": "stream", # Correct key
-                    "action_id": action_id,
-                    "stream": "stderr",
-                    "line": stderr
-                })
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                # 实际执行 IPython 代码
+                exec_result = ipy.run_cell(request.code, store_history=True)
 
-            # 在 run_ipython_cell 函数内部，找到处理 exec_result 失败的部分
-# (大约在 try...except 块之后，检查 exec_result.error_before_exec 或 exec_result.error_in_exec 的地方)
+            stdout = stdout_buf.getvalue()
+            stderr = stderr_buf.getvalue()
 
-        # Send result observation
-            if exec_result.error_before_exec or exec_result.error_in_exec:
-                exit_code = 1
-                error_name = "UnknownError"
-                error_value = "Unknown error occurred during IPython execution."
-                formatted_tb = [] # Initialize as empty list
+            logger.info(f"[AGENT] IPython execution finished inside lock. ActionID: {action_id}. Success: {exec_result.success}. Stdout: {len(stdout)} chars. Stderr: {len(stderr)} chars.")
 
-                # --- 修改开始: 尝试获取结构化错误信息 ---
-                error_info = exec_result.error_in_exec or exec_result.error_before_exec
-                if error_info:
-                    try:
-                        # error_info should be a tuple (etype, evalue, tb)
-                        ex_type, ex_value, tb = error_info
-                        error_name = ex_type.__name__
-                        error_value = str(ex_value)
+            # --- 发送观测数据的逻辑 (保持不变，但现在它在锁的保护下) ---
+            if runtime_observation_url and action_id:
+                # 发送 stdout stream
+                if stdout:
+                    send_observation(runtime_observation_url, {
+                        "observation_type": "stream",
+                        "action_id": action_id,
+                        "stream": "stdout",
+                        "line": stdout # 发送完整 stdout
+                    })
 
-                        # Use InteractiveTB for formatting if available and working
-                        # Ensure ipy.InteractiveTB exists and has necessary methods
-                        if hasattr(ipy, 'InteractiveTB') and hasattr(ipy.InteractiveTB, 'structured_traceback'):
-                            # Get structured traceback
-                            stb = ipy.InteractiveTB.structured_traceback(ex_type, ex_value, tb)
-                            # Format it into a list of strings
-                            formatted_tb = ipy.InteractiveTB.format_structured_traceback(stb)
-                            logger.debug(f"[AGENT] Successfully formatted IPython traceback. ActionID: {action_id}")
-                        else:
-                            # Fallback to standard traceback formatting if InteractiveTB fails or is unavailable
-                            formatted_tb = traceback.format_exception(ex_type, ex_value, tb)
-                            logger.warning(f"[AGENT] Using standard traceback formatting as InteractiveTB formatting failed or is unavailable. ActionID: {action_id}")
+                # 发送 stderr stream (IPython错误通常在stdout，但以防万一)
+                if stderr:
+                     send_observation(runtime_observation_url, {
+                        "observation_type": "stream",
+                        "action_id": action_id,
+                        "stream": "stderr",
+                        "line": stderr
+                    })
 
-                    except Exception as format_err:
-                        # Handle errors during extraction/formatting
-                        logger.error(f"[AGENT] Failed to extract/format IPython traceback info. ActionID: {action_id}. Error: {format_err}", exc_info=True)
-                        # Use simpler info if possible
-                        if error_info and isinstance(error_info, tuple) and len(error_info) >= 2:
-                            error_name = getattr(error_info[0], '__name__', 'UnknownError')
-                            error_value = str(error_info[1]) if error_info[1] else "Error value unavailable"
-                        else:
-                            error_value = str(error_info) # Fallback to string representation of whatever error_info is
-                        formatted_tb = ["Traceback formatting failed."]
-                # --- 修改结束 ---
+                # 发送 result 观测
+                if exec_result.error_before_exec or exec_result.error_in_exec:
+                   # (这里是你上次修改过的、提取 error_name/value/traceback 的逻辑)
+                    exit_code = 1
+                    error_info = exec_result.error_in_exec or exec_result.error_before_exec
+                    if error_info:
+                       try:
+                           ex_type, ex_value, tb = error_info
+                           error_name = ex_type.__name__
+                           error_value = str(ex_value)
+                           if hasattr(ipy, 'InteractiveTB') and hasattr(ipy.InteractiveTB, 'structured_traceback'):
+                                stb = ipy.InteractiveTB.structured_traceback(ex_type, ex_value, tb)
+                                formatted_tb = ipy.InteractiveTB.format_structured_traceback(stb)
+                           else:
+                                formatted_tb = traceback.format_exception(ex_type, ex_value, tb)
+                       except Exception as format_err:
+                           logger.error(f"[AGENT] Failed to extract/format IPython traceback info. ActionID: {action_id}. Error: {format_err}", exc_info=True)
+                           formatted_tb = ["Traceback formatting failed."]
+                           # 简化错误信息
+                           if error_info and isinstance(error_info, tuple) and len(error_info) >= 2:
+                               error_name = getattr(error_info[0], '__name__', 'UnknownError')
+                               error_value = str(error_info[1]) if error_info[1] else "Error value unavailable"
+                           else:
+                               error_name = "UnknownError"
+                               error_value = str(error_info)
 
-                # 发送包含结构化错误信息的 result 观测
-                send_observation(runtime_observation_url, {
-                    "observation_type": "result", # Key for observation type
-                    "action_id": action_id,
-                    "exit_code": exit_code,
-                    # --- 使用新的字段名 ---
-                    "status": "error", # Add status field expected by model
-                    "error_name": error_name,
-                    "error_value": error_value,
-                    "traceback": formatted_tb, # Send formatted traceback list
-                    # --- 不再发送简单的 'error' 字段 ---
-                    # "error": error_message # Remove this or keep it as supplemental if needed? Removing for strict alignment.
-                })
+                    send_observation(runtime_observation_url, {
+                        "observation_type": "result",
+                        "action_id": action_id,
+                        "exit_code": exit_code,
+                        "status": "error",
+                        "error_name": error_name,
+                        "error_value": error_value,
+                        "traceback": formatted_tb,
+                    })
+                else:
+                    exit_code = 0
+                    send_observation(runtime_observation_url, {
+                        "observation_type": "result",
+                        "action_id": action_id,
+                        "exit_code": exit_code,
+                        "status": "ok"
+                    })
             else:
-                # Successful execution path remains similar
-                exit_code = 0
-                send_observation(runtime_observation_url, {
-                    "observation_type": "result",
-                    "action_id": action_id,
-                    "exit_code": exit_code,
-                    "status": "ok" # Add status field expected by model
-                    # Include exec_result.result if needed
-                    # "result_data": exec_result.result # This can be complex
-                })
-        else:
-             logger.warning(f"[AGENT] Cannot send observations: URL={runtime_observation_url}, action_id={action_id}")
+                 logger.warning(f"[AGENT] Cannot send observations: URL missing or action_id missing. URL={runtime_observation_url}, ActionID={action_id}")
 
-        return Response(status_code=200)
+        except Exception as e:
+            # --- 处理核心逻辑中的意外错误 ---
+            exit_code = -1 # 或者其他表示内部错误的码
+            error_msg = f"Internal agent error during IPython execution: {e}"
+            tb_str = traceback.format_exc()
+            logger.error(f"[AGENT] {error_msg}. ActionID: {action_id}\n{tb_str}")
 
-    except Exception as e:
-        exit_code = -1
-        error_msg = f"Internal agent error during IPython execution: {e}"
-        tb_str = traceback.format_exc()
-        logger.error(f"[AGENT] {error_msg}. ActionID: {action_id}\n{tb_str}")
+            if runtime_observation_url and action_id:
+                 # 发送一个表示错误的 'result' 或专门的 'error' 观测
+                 send_observation(runtime_observation_url, {
+                     "observation_type": "result", # 或者 "error"
+                     "action_id": action_id,
+                     "exit_code": exit_code,
+                     "status": "error", # 明确状态
+                     "error_name": type(e).__name__,
+                     "error_value": error_msg,
+                     "traceback": tb_str.splitlines() # 发送 traceback 字符串列表
+                 })
+            # 在锁内部重新抛出为 HTTP 异常，FastAPI 会处理
+            raise HTTPException(status_code=500, detail=error_msg)
 
-        if runtime_observation_url and action_id:
-            send_observation(runtime_observation_url, {
-                "observation_type": "result", # Correct key
-                "action_id": action_id,
-                "exit_code": exit_code,
-                "error": error_msg
-            })
-        raise HTTPException(status_code=500, detail=error_msg)
+        # --- 核心逻辑结束 ---
+        # A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A A
 
+        logger.info(f"[AGENT] Releasing lock for SandboxID: {sandbox_id}, ActionID: {action_id}.")
+    # --- 关键：锁在这里自动释放 ---
+
+    # 注意：HTTP 响应应该在锁释放之后发送
+    # Executor 的设计是异步发送观测，并立即返回 200 OK 给 Runtime
+    return Response(status_code=200)
 
 @app.post(
     "/tools:run_shell_command",
