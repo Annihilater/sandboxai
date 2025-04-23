@@ -136,7 +136,7 @@ class SpaceManager:
         """
         logger.info(f"Creating space: {request.name}")
         try:
-            response = self._client.post("/v1/spaces", json=request.dict(exclude_none=True))
+            response = self._client.post("/v1/spaces", json=request.model_dump(exclude_none=True))
             data = self._handle_response(response)
             return Space(**data)
         except httpx.RequestError as e:
@@ -166,6 +166,19 @@ class SpaceManager:
         try:
             response = self._client.get(f"/v1/spaces/{space_id}")
             data = self._handle_response(response)
+            # 转换字段名
+            if "ID" in data:
+                data["space_id"] = data.pop("ID")
+            if "Name" in data:
+                data["name"] = data.pop("Name")
+            if "Description" in data:
+                data["description"] = data.pop("Description")
+            if "CreatedAt" in data:
+                data["created_at"] = data.pop("CreatedAt")
+            if "UpdatedAt" in data:
+                data["updated_at"] = data.pop("UpdatedAt")
+            if "Metadata" in data:
+                data["metadata"] = data.pop("Metadata")
             return Space(**data)
         except httpx.RequestError as e:
             raise MentisConnectionError(f"Failed to connect to server: {str(e)}", original_error=e)
@@ -191,7 +204,27 @@ class SpaceManager:
         try:
             response = self._client.get("/v1/spaces")
             data = self._handle_response(response)
-            return [Space(**item) for item in data]
+            # 转换字段名
+            spaces = []
+            for item in data:
+                if "ID" in item:
+                    item["space_id"] = item.pop("ID")
+                if "Name" in item:
+                    name = item.pop("Name")
+                    # 转换 name 为符合要求的格式
+                    if name == "Default Space":
+                        name = "default"
+                    item["name"] = name
+                if "Description" in item:
+                    item["description"] = item.pop("Description")
+                if "CreatedAt" in item:
+                    item["created_at"] = item.pop("CreatedAt")
+                if "UpdatedAt" in item:
+                    item["updated_at"] = item.pop("UpdatedAt")
+                if "Metadata" in item:
+                    item["metadata"] = item.pop("Metadata")
+                spaces.append(Space(**item))
+            return spaces
         except httpx.RequestError as e:
             raise MentisConnectionError(f"Failed to connect to server: {str(e)}", original_error=e)
         except httpx.TimeoutException as e:

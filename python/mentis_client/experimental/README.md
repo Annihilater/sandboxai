@@ -1,149 +1,374 @@
-# Mentis沙箱实验性功能
+# Mentis Sandbox Experimental Features
 
-本目录包含Mentis沙箱的实验性功能和集成。这些功能可能在未来版本中发生变化或被移除，请谨慎使用。
+This directory contains experimental features and integrations for the Mentis Sandbox. These features are subject to change or removal in future versions, so please use them with caution.
 
-## 目前支持的集成
+## Currently Supported Integrations
 
-- [CrewAI](#crewai集成) - 将Mentis沙箱与CrewAI代理框架集成
-- [LangGraph](#langgraph集成) - 将Mentis沙箱与LangGraph代理框架集成
+- [CrewAI Integration](#crewai-integration) - Integrate Mentis Sandbox with the CrewAI agent framework.
+- [LangGraph Integration](#langgraph-integration) - Integrate Mentis Sandbox with the LangGraph agent framework.
 
-## 安装依赖
+## Installation
 
-要使用实验性功能，您需要安装相应的依赖：
+To use these experimental features, ensure you have the base `mentis-client` installed, and then install the corresponding "extras" for the integrations you need:
 
 ```bash
-# 安装CrewAI集成所需依赖
-pip install crewai
+# Install core client and dependencies for CrewAI integration
+pip install "mentis-client[crewai]"
 
-# 安装LangGraph集成所需依赖
-pip install langgraph
+# Install core client and dependencies for LangGraph integration (includes langchain-openai)
+# Replace 'langchain-openai' with your preferred LLM provider if needed, 
+# ensuring it's reflected in the package's optional dependencies.
+pip install "mentis-client[langgraph]"
+
+# Install all experimental dependencies
+pip install "mentis-client[all_experimental]" 
 ```
+*(Note: This assumes `mentis-client`'s `pyproject.toml` or `setup.py` defines these `[crewai]`, `[langgraph]`, and `[all_experimental]` extras correctly, including dependencies like `crewai`, `langgraph`, and `langchain-openai`)*
 
-## CrewAI集成
 
-CrewAI集成允许您在CrewAI代理中使用Mentis沙箱执行Python代码和Shell命令。
+## CrewAI Integration
 
-### 基本用法
+The CrewAI integration allows you to use the Mentis Sandbox for executing Python code and shell commands within your CrewAI Agents.
+
+### Basic Usage
 
 ```python
+import os
 from mentis_client.experimental import MentisIPythonTool, MentisShellTool
 from crewai import Agent, Task, Crew
 
-# 创建Mentis工具
+# Requires OPENAI_API_KEY environment variable for the default CrewAI LLM
+# os.environ["OPENAI_API_KEY"] = "YOUR_API_KEY" 
+
+# Create Mentis tools (implicitly uses an embedded sandbox)
 python_tool = MentisIPythonTool()
 shell_tool = MentisShellTool()
 
-# 创建使用Mentis工具的代理
+# Create an agent that uses the Mentis tools
 data_scientist = Agent(
-    role="数据科学家",
-    goal="分析数据并生成见解",
-    backstory="你是一位经验丰富的数据科学家，擅长数据分析和可视化。",
-    tools=[python_tool, shell_tool]
+    role="Data Scientist",
+    goal="Analyze data and generate insights",
+    backstory="You are an experienced data scientist skilled in data analysis and visualization.",
+    tools=[python_tool, shell_tool],
+    allow_delegation=False # Example: Disable delegation for simplicity
 )
 
-# 创建任务
+# Create a task
 analysis_task = Task(
-    description="分析提供的数据集并生成摘要统计信息",
+    description="Analyze the provided dataset '/data/input.csv' and generate summary statistics. Save the summary to '/data/summary.txt'.",
+    expected_output="A text file named summary.txt containing the summary statistics.",
     agent=data_scientist
 )
 
-# 创建并运行Crew
-crew = Crew(
+# Create and run the Crew
+data_crew = Crew(
     agents=[data_scientist],
-    tasks=[analysis_task]
+    tasks=[analysis_task],
+    verbose=2 # Set verbosity level
 )
 
-result = crew.kickoff()
+result = data_crew.kickoff()
+print("\n--- Crew Execution Result ---")
 print(result)
+
+# Remember to clean up resources if needed, although tools handle basic cleanup
+python_tool.close() 
+shell_tool.close() 
 ```
 
-### 高级用法
+### Advanced Usage (Shared Sandbox)
 
-您可以在初始化工具时提供现有的沙箱实例：
+You can provide an existing sandbox instance when initializing tools to share the same environment.
 
 ```python
 from mentis_client import MentisSandbox
 from mentis_client.experimental import MentisIPythonTool, MentisShellTool
+# Import Agent, Task, Crew etc. as in the basic example
 
-# 创建沙箱实例
-sandbox = MentisSandbox.create()
+# Create a sandbox instance explicitly
+# This could connect to an existing runtime or start an embedded one
+sandbox = MentisSandbox.create() 
 
-# 使用现有沙箱创建工具
-python_tool = MentisIPythonTool(sandbox=sandbox)
-shell_tool = MentisShellTool(sandbox=sandbox)
+try:
+    # Create tools using the existing sandbox
+    python_tool = MentisIPythonTool(sandbox=sandbox)
+    shell_tool = MentisShellTool(sandbox=sandbox)
+
+    # --- Define Agent, Task, Crew as in Basic Usage ---
+    data_scientist = Agent(
+        role="Shared Sandbox Data Scientist",
+        goal="Perform analysis in a persistent sandbox",
+        backstory="You operate within a shared, persistent sandbox environment.",
+        tools=[python_tool, shell_tool]
+    )
+    analysis_task = Task(
+        description="Load data from '/shared/data.pkl', perform calculations, save results to '/shared/results.pkl'.",
+        expected_output="A pickle file named results.pkl in the /shared directory.",
+        agent=data_scientist
+    )
+    data_crew = Crew(
+        agents=[data_scientist],
+        tasks=[analysis_task],
+        verbose=2
+    )
+    
+    result = data_crew.kickoff()
+    print("\n--- Shared Sandbox Crew Execution Result ---")
+    print(result)
+
+finally:
+    # Explicitly delete the sandbox when done if you created it explicitly
+    if sandbox:
+        print("Deleting shared sandbox...")
+        sandbox.delete()
+        print("Sandbox deleted.")
+
 ```
 
-## LangGraph集成
+## LangGraph Integration
 
-LangGraph集成允许您在LangGraph工作流中使用Mentis沙箱执行Python代码和Shell命令。
+The LangGraph integration allows you to use the Mentis Sandbox for Python code execution within your LangGraph workflows, typically invoked via LangGraph's standard tool handling mechanisms.
 
-### 基本用法
+*(Note: A `LangGraphMentisShellTool` might also exist; adapt examples if needed.)*
+
+### Simplest Usage (Tool Trigger Test)
+
+This example demonstrates the most basic way to trigger the tool directly within a graph, without involving an LLM, purely for testing the tool invocation mechanism.
 
 ```python
-from mentis_client.experimental import MentisPythonTool, LangGraphMentisShellTool, MentisToolNode
-from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
+import logging
+import os
+from typing import TypedDict, Annotated
 
-# 创建语言模型
-llm = ChatOpenAI()
+# Configure logging (set to DEBUG to see sandbox details)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s') 
+logger = logging.getLogger("mentis-minimal-tool-test-en")
 
-# 创建Mentis工具
-python_tool = MentisPythonTool()
-shell_tool = LangGraphMentisShellTool()
+try:
+    from langgraph.graph import StateGraph, END
+    from langgraph.graph.message import add_messages 
+    from langgraph.prebuilt import ToolNode # Use standard ToolNode
+    from langchain_core.messages import BaseMessage, AIMessage, ToolMessage 
+    from mentis_client.experimental import MentisPythonTool
+except ImportError as e:
+    logger.error(f"Required libraries not found: {e}. Please install: pip install 'mentis-client[langgraph]'")
+    exit(1)
 
-# 创建工具节点
-tool_node = MentisToolNode.create(tools=[python_tool, shell_tool], llm=llm)
+# --- Define State ---
+class SimpleToolTestState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
 
-# 创建状态图
-workflow = StateGraph()
+# --- Initialize Tool and ToolNode ---
+logger.info("Initializing MentisPythonTool...")
+mentis_tool = None
+try:
+    mentis_tool = MentisPythonTool(sync_timeout=60.0) 
+    tool_name = mentis_tool.name
+    tools = [mentis_tool]
+    tool_node = ToolNode(tools=tools) # Use standard ToolNode
+    logger.info(f"MentisPythonTool ('{tool_name}') and ToolNode initialized successfully.")
+except Exception as e:
+    logger.exception("FATAL: Failed to initialize Mentis tool or ToolNode. Exiting.")
+    raise RuntimeError("Halting script due to tool initialization failure.") from e 
 
-# 添加节点
-workflow.add_node("tool_executor", tool_node)
+# --- Define Node to Generate Tool Call ---
+def generate_tool_call_node(state: SimpleToolTestState):
+    """Directly generates an AIMessage to trigger the Mentis tool."""
+    logger.info("--- Node: generate_tool_call ---")
+    code_to_run = "import platform; print(f'Hello from Mentis Sandbox on {platform.system()}!'); result = 42 + 100; print(f'Calculation result: {result}'); result"
+    tool_call_id = "minimal_test_call_en_001"
+    logger.info(f"Hardcoding tool call for '{tool_name}' with ID '{tool_call_id}'")
+    ai_message = AIMessage(
+        content="Simulating request: Please run this Python code.",
+        tool_calls=[{"id": tool_call_id, "name": tool_name, "args": {"code": code_to_run}}]
+    )
+    return {"messages": [ai_message]}
 
-# 添加边
-workflow.add_edge("tool_executor", END)
+# --- Build the Graph ---
+logger.info("Building the simplified graph...")
+graph_builder = StateGraph(SimpleToolTestState)
+graph_builder.add_node("call_generator", generate_tool_call_node)
+graph_builder.add_node("tool_runner", tool_node) 
+graph_builder.set_entry_point("call_generator")
+graph_builder.add_edge("call_generator", "tool_runner")
+graph_builder.add_edge("tool_runner", END) # End after tool runs
 
-# 编译图
-executable = workflow.compile()
+# --- Compile and Run ---
+try:
+    graph = graph_builder.compile()
+    logger.info("Graph compiled successfully.")
+    
+    logger.info("--- Starting Minimal Tool Test Execution ---")
+    final_state = None
+    for state_update in graph.stream({"messages": []}, stream_mode="values"):
+        final_state = state_update
+        # Optional: print step outputs
+        # ... (add printing logic if desired) ...
 
-# 执行图
-result = executable.invoke({"input": "分析以下数据并生成摘要统计信息"})
-print(result)
+    logger.info("--- Minimal Tool Test Execution Finished ---")
+    # Check final_state['messages'] to verify ToolMessage content
+    print("Final State Messages:")
+    # ... (add final state printing logic) ...
+    # Verify ToolMessage content for success/error
+
+except Exception as e:
+    logger.exception("An error occurred during graph execution.")
+finally:
+    if mentis_tool and hasattr(mentis_tool, 'close'):
+        logger.info("Cleaning up MentisPythonTool resources...")
+        mentis_tool.close() 
+        logger.info("Cleanup complete.")
+    logger.info("Minimal tool test script finished.")
+
 ```
 
-### 高级用法
+### Basic Usage (Agent Loop with LLM)
 
-您可以自定义工具配置：
+This example shows a more typical pattern where an LLM decides when to call the Mentis tool and processes its result within a stateful graph.
 
 ```python
-from mentis_client.experimental import MentisPythonTool, LangGraphMentisShellTool, MentisPythonToolConfig, MentisShellToolConfig
+import logging
+import os
+from typing import TypedDict, Annotated, Sequence
 
-# 自定义Python工具配置
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s') 
+logger = logging.getLogger("mentis-langgraph-agent-en")
+
+# Requires OPENAI_API_KEY environment variable
+# os.environ["OPENAI_API_KEY"] = "YOUR_API_KEY" 
+
+try:
+    from langgraph.graph import StateGraph, END
+    from langgraph.graph.message import add_messages 
+    from langgraph.prebuilt import ToolNode # Use standard ToolNode
+    from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
+    from langchain_openai import ChatOpenAI # Needs langchain-openai installed
+    from mentis_client.experimental import MentisPythonTool
+except ImportError as e:
+    logger.error(f"Required libraries not found: {e}. Please install: pip install 'mentis-client[langgraph]'")
+    exit(1)
+
+# --- Define State ---
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+
+# --- Initialize LLM, Tool, and ToolNode ---
+logger.info("Initializing LLM and Tool...")
+mentis_tool = None
+try:
+    llm = ChatOpenAI(model="gpt-4o") # Or your preferred model
+    mentis_tool = MentisPythonTool(sync_timeout=120.0) 
+    tools = [mentis_tool]
+    # Bind tool to LLM for function calling
+    llm_with_tools = llm.bind_tools(tools) 
+    tool_node = ToolNode(tools=tools) # Use standard ToolNode
+    logger.info(f"LLM, MentisPythonTool ('{mentis_tool.name}'), and ToolNode initialized.")
+except Exception as e:
+    logger.exception("FATAL: Failed to initialize components.")
+    if mentis_tool and hasattr(mentis_tool, 'close'):
+        mentis_tool.close()
+    raise RuntimeError("Halting script due to component initialization failure.") from e
+
+# --- Define Agent Node ---
+def agent_node(state: AgentState):
+    """Invokes the LLM to decide the next action or process tool results."""
+    logger.info("Agent Node executing...")
+    messages = state['messages']
+    last_message = messages[-1] if messages else None
+
+    # Prevent loop if LLM tries to call tool immediately after tool result
+    if isinstance(last_message, ToolMessage):
+        logger.info("Last message was ToolMessage. Calling LLM for final response.")
+        response = llm_with_tools.invoke(messages) 
+        if getattr(response, 'tool_calls', None):
+            logger.warning("LLM tried tool call after ToolMessage! Overriding.")
+            return {"messages": [AIMessage(content="Tool executed. Processing finished.")]}
+        return {"messages": [response]}
+    else: # Human message or other state
+        logger.info("Calling LLM for next step...")
+        response = llm_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+# --- Define Router ---
+def should_continue(state: AgentState) -> str:
+    """Routes to tools if the LLM requested them, otherwise ends."""
+    last_message = state['messages'][-1] if state['messages'] else None
+    if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
+        logger.info("Router: Tool call detected, routing to 'tools'.")
+        return "tools"
+    else:
+        logger.info("Router: No tool call, routing to END.")
+        return END
+
+# --- Build Graph ---
+logger.info("Building the agent graph...")
+graph_builder = StateGraph(AgentState)
+graph_builder.add_node("agent", agent_node)
+graph_builder.add_node("tools", tool_node)
+graph_builder.set_entry_point("agent")
+graph_builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+graph_builder.add_edge("tools", "agent") # Always go back to agent after tools run
+
+# --- Compile and Run ---
+try:
+    graph = graph_builder.compile()
+    logger.info("Graph compiled successfully.")
+    
+    logger.info("--- Starting Agent Execution ---")
+    initial_input = {"messages": [HumanMessage(content="Calculate 12 * (sqrt(144) + 3) using Python.")]}
+    for event in graph.stream(initial_input, stream_mode="values"):
+        # Print or process events as needed
+        print(f"--- State Update ---")
+        print(event) 
+
+    logger.info("--- Agent Execution Finished ---")
+
+except Exception as e:
+    logger.exception("An error occurred during graph execution.")
+finally:
+    if mentis_tool and hasattr(mentis_tool, 'close'):
+        logger.info("Cleaning up MentisPythonTool resources...")
+        mentis_tool.close() 
+        logger.info("Cleanup complete.")
+    logger.info("Agent script finished.")
+
+```
+
+### Advanced Usage (Custom Tool Configuration)
+
+You can customize the tool's behavior by providing configuration objects during initialization.
+
+```python
+from mentis_client.experimental import MentisPythonTool, MentisPythonToolConfig # Assuming config classes exist
+
+# Define custom configuration for the Python tool
 python_config = MentisPythonToolConfig(
-    name="python_executor",
-    description="在安全的沙箱环境中执行Python数据分析代码",
-    timeout=60  # 设置超时时间为60秒
+    name="python_data_processor",
+    description="Executes Python code for data processing tasks in a secure sandbox.",
+    sync_timeout=180,  # Set a longer timeout (in seconds)
+    # Add other relevant config options here, e.g., startup_script, work_dir
 )
 
-# 自定义Shell工具配置
-shell_config = MentisShellToolConfig(
-    name="shell_executor",
-    description="在安全的沙箱环境中执行数据处理命令",
-    timeout=30,  # 设置超时时间为30秒
-    work_dir="/data"  # 设置工作目录
-)
+# Create the tool instance with the custom configuration
+# Note: This configured tool would then be used when building the graph 
+# in the "Basic Usage (Agent Loop with LLM)" example above.
+custom_python_tool = MentisPythonTool(config=python_config)
 
-# 创建自定义配置的工具
-python_tool = MentisPythonTool(config=python_config)
-shell_tool = LangGraphMentisShellTool(config=shell_config)
+# You can now use 'custom_python_tool' in the 'tools' list passed to 
+# llm.bind_tools() and ToolNode(...) in the graph setup.
+print(f"Custom tool created: Name='{custom_python_tool.name}', Timeout='{custom_python_tool.sync_timeout}'") 
+# Add cleanup for this tool instance if used separately
+# custom_python_tool.close() 
 ```
 
-## 注意事项
+## Important Notes
 
-- 实验性功能可能在未来版本中发生变化或被移除。
-- 请确保您的环境中已安装相应的依赖（CrewAI或LangGraph）。
-- 沙箱资源会在工具对象被垃圾回收时自动清理，但建议在不再需要时显式调用`delete()`方法释放资源。
+- These features are experimental and their API or behavior may change or be removed in future releases without prior notice.
+- Ensure you have installed the necessary dependencies for the integrations you plan to use (see Installation section). Required libraries like `langchain-openai` for LLM examples must also be installed.
+- API keys (e.g., `OPENAI_API_KEY`) may be required for examples involving Large Language Models and should be set as environment variables.
+- Sandbox resources are typically cleaned up automatically when the corresponding tool or sandbox object is garbage collected. However, to ensure timely and reliable cleanup, especially in long-running applications or after errors, it is **strongly recommended** to explicitly call the tool's `.close()` method (or the sandbox's `.delete()` method if created separately) using a `try...finally` block or a context manager (`with MentisPythonTool(...) as tool:`) if available.
 
-## 贡献
+## Contributing
 
-欢迎为Mentis沙箱的实验性功能做出贡献。如果您有任何建议或发现问题，请提交issue或pull request。
+Contributions to Mentis Sandbox experimental features are welcome! If you have suggestions or encounter issues, please feel free to submit an issue or pull request on the project repository.

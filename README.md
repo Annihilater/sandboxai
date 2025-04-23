@@ -35,6 +35,7 @@ MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环
 - Make (可选，用于构建脚本)
 - WebSocket 客户端 (例如 `websocat`，用于测试)
 - curl (用于 API 请求)
+- Python 3.8+ (用于使用 Python 客户端)
 
 ### 构建与启动
 
@@ -53,16 +54,128 @@ MentisSandbox 是一个安全、持久化、具备实时反馈能力的沙箱环
 
 3.  **启动 MentisRuntime 服务**
 
+    有两种方式启动服务器：
+
+    a. 编译后运行：
     ```bash
-    go run ./mentisruntime/main.go
+    make build/sandboxaid
+    ./bin/sandboxaid
     ```
+
+    b. 直接运行 Go 代码：
+    ```bash
+    go run ./go/mentisruntime/main.go
+    ```
+
     服务默认监听在 `127.0.0.1:5266`。
+
+4. **安装 Python 客户端**
+
+    ```bash
+    pip install mentis-client
+    ```
 
 ## 快速开始
 
+### 使用 Python 客户端
+
+MentisSandbox 提供了 Python 客户端库，支持两种使用模式：
+
+#### 1. 连接模式
+
+连接到已运行的 MentisRuntime 服务器：
+
+```python
+from mentis_client.client import MentisSandbox
+import queue
+
+# 创建观察队列
+obs_queue = queue.Queue()
+
+# 连接到服务器
+with MentisSandbox.create(
+    base_url="http://localhost:5266",
+    observation_queue=obs_queue,
+    space_id="default"
+) as sandbox:
+    # 执行 Python 代码
+    action_id = sandbox.run_ipython_cell("print('Hello, World!')")
+    
+    # 等待并收集结果
+    while True:
+        obs = obs_queue.get()
+        if obs.action_id == action_id:
+            if obs.observation_type == "stream":
+                print(obs.line, end="")
+            elif obs.observation_type == "end":
+                break
+```
+
+#### 2. 嵌入式模式
+
+自动管理服务器进程，无需手动启动：
+
+```python
+from mentis_client.embedded import EmbeddedMentisSandbox
+import queue
+
+# 创建观察队列
+obs_queue = queue.Queue()
+
+# 使用嵌入式模式
+with EmbeddedMentisSandbox(
+    observation_queue=obs_queue,
+    space_id="default"
+) as sandbox:
+    # 执行 Python 代码
+    action_id = sandbox.run_ipython_cell("print('Hello, World!')")
+    
+    # 等待并收集结果
+    while True:
+        obs = obs_queue.get()
+        if obs.action_id == action_id:
+            if obs.observation_type == "stream":
+                print(obs.line, end="")
+            elif obs.observation_type == "end":
+                break
+```
+
+#### 3. LangGraph 集成
+
+MentisSandbox 提供了与 LangGraph 框架的集成支持：
+
+```python
+from mentis_client.experimental.langgraph import MentisPythonTool
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage
+
+# 创建 MentisPythonTool
+sandbox = MentisSandbox.create(base_url="http://localhost:5266")
+python_tool = MentisPythonTool(sandbox=sandbox)
+
+# 构建 LangGraph
+graph = StateGraph(AgentState)
+graph.add_node("agent", agent_node)
+graph.add_node("sandbox_tool", ToolNode([python_tool]))
+graph.set_entry_point("agent")
+graph.add_conditional_edges(
+    "agent",
+    should_continue,
+    {
+        "sandbox_tool": "sandbox_tool",
+        END: END
+    }
+)
+graph.add_edge("sandbox_tool", "agent")
+```
+
+更多示例请查看 `python/examples` 目录。
+
+### 使用 HTTP API (原始方式)
+
 MentisRuntime 启动时会自动创建一个名为 `default` 的 Space。
 
-### 1. 创建沙箱 (在 default Space 中)
+#### 1. 创建沙箱 (在 default Space 中)
 
 ```bash
 curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes \
@@ -83,7 +196,7 @@ curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes \
 ```
 **记下返回的 `sandbox_id` (YOUR_SANDBOX_ID)。**
 
-### 2. 连接到 WebSocket 流
+#### 2. 连接到 WebSocket 流
 
 在一个单独的终端中，使用 `websocat` (或其他 WebSocket 客户端) 连接到沙箱的 WebSocket 流，以接收实时输出：
 
@@ -92,7 +205,7 @@ websocat ws://127.0.0.1:5266/v1/sandboxes/YOUR_SANDBOX_ID/stream
 ```
 将 `YOUR_SANDBOX_ID` 替换为上一步获取到的 ID。
 
-### 3. 执行 Shell 命令
+#### 3. 执行 Shell 命令
 
 ```bash
 curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes/YOUR_SANDBOX_ID/tools:run_shell_command \
@@ -101,7 +214,7 @@ curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes/YOUR_SANDBOX_ID/t
 ```
 你将在 `websocat` 连接的终端看到 "Hello from MentisSandbox Shell" 和 "Shell Done." 的输出。
 
-### 4. 执行 Python 代码 (IPython)
+#### 4. 执行 Python 代码 (IPython)
 
 ```bash
 curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes/YOUR_SANDBOX_ID/tools:run_ipython_cell \
@@ -110,7 +223,7 @@ curl -X POST http://127.0.0.1:5266/v1/spaces/default/sandboxes/YOUR_SANDBOX_ID/t
 ```
 你将在 `websocat` 连接的终端看到 "Hello from IPython" 和 "IPython Done." 的输出。
 
-### 5. 清理沙箱 (可选)
+#### 5. 清理沙箱 (可选)
 
 ```bash
 curl -X DELETE http://127.0.0.1:5266/v1/spaces/default/sandboxes/YOUR_SANDBOX_ID

@@ -1,281 +1,746 @@
-# SandboxAI API Specification
-#
-# All Operations:
-#
-# * Should accept types suffixed with "Request".
-#
-# RPC operations:
-#
-# * Should return types suffixed with "Result".
-#
-# Resource operations:
-#
-# * Should return the relevant "resource" type.
-#
-# Resource types:
-#
-# * Should contain "spec" and "status" fields.
-# * The "spec" field should contain user-specified parameters.
-# * The "spec" field should be reused for create operations.
-#
-# Create operations:
-#
-# * Should accept creation-specific request that contain the relevant resource "spec".
-# * Should return the relevant "resource" type.
-#
-# Get operations:
-#
-# * Should return the relevant "resource" type.
-#
-openapi: '3.0.3'
+openapi: 3.0.3
 info:
-  title: SandboxAI
-  version: '1.0'
-  description: API for managing sandboxes in SandboxAI.
+  title: Mentis API (Combined Models)
+  description: API for managing Spaces, persistent Sandboxes, and executing commands within them. Based on combined Python models.
+  version: 1.1.0 # Incremented version
 servers:
-  - url: https://api.substratus.ai/sandboxai/v1
+  - url: /v1 # Assuming v1 base path
+
 paths:
-  /spaces/{space}/sandboxes/{name}:
+  /spaces:
     get:
-      summary: Retrieve a sandbox.
-      operationId: getSandbox
-      parameters:
-        - name: space
-          in: path
-          required: true
-          description: The space the sandbox lives in.
-          schema:
-            type: string
-        - name: name
-          in: path
-          required: true
-          description: The name of the sandbox to retrieve.
-          schema:
-            type: string
+      summary: List spaces
+      description: Retrieves a list of available spaces.
+      operationId: listSpaces
       responses:
         '200':
-          description: OK
+          description: A list of spaces.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Sandbox'
-    delete:
-      summary: Delete a sandbox.
-      operationId: deleteSandbox
-      parameters:
-        - name: space
-          in: path
-          required: true
-          description: The space the sandbox lives in.
-          schema:
-            type: string
-        - name: name
-          in: path
-          required: true
-          description: The name of the sandbox to delete.
-          schema:
-            type: string
-      responses:
-        '204':
-          description: No Content
-  /spaces/{space}/sandboxes:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Space'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     post:
-      summary: Create a new sandbox.
-      operationId: createSandbox
-      parameters:
-        - name: space
-          in: path
-          required: true
-          description: The space the sandbox should live in.
-          schema:
-            type: string
+      summary: Create a new space
+      description: Creates a new space resource.
+      operationId: createSpace
       requestBody:
+        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateSandboxRequest'
+              $ref: '#/components/schemas/CreateSpaceRequest'
       responses:
         '201':
-          description: Created
+          description: Space created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Space'
+        '400':
+          description: Invalid input provided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: The unique identifier of the space.
+        schema:
+          type: string
+    get:
+      summary: Get space details
+      description: Retrieves details for a specific space.
+      operationId: getSpace
+      responses:
+        '200':
+          description: Space details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Space'
+        '404':
+          description: Space not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      summary: Update a space
+      description: Updates properties of an existing space.
+      operationId: updateSpace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSpaceRequest'
+      responses:
+        '200':
+          description: Space updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Space'
+        '404':
+          description: Space not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Invalid input provided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a space
+      description: Deletes an existing space and potentially its contents (behavior depends on implementation).
+      operationId: deleteSpace
+      responses:
+        '204':
+          description: Space deleted successfully.
+        '404':
+          description: Space not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}/sandboxes:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: The identifier of the space containing the sandboxes.
+        schema:
+          type: string
+          default: default # Assuming default space if needed
+    get:
+      summary: List sandboxes in a space
+      description: Retrieves a list of sandboxes within a specific space.
+      operationId: listSandboxes
+      responses:
+        '200':
+          description: A list of sandboxes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Sandbox'
+        '404':
+          description: Space not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Create a new sandbox
+      description: Creates a new sandbox environment within a specified space.
+      operationId: createSandbox
+      requestBody:
+        description: Sandbox creation details (spec is optional server-side).
+        required: false # Making body optional based on logs, server might use defaults
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSandboxRequest' # Uses the model allowing optional spec
+      responses:
+        '201': # Use 201 Created for successful resource creation
+          description: Sandbox created successfully. Returns details including the ID and agent URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sandbox' # Return the created sandbox object
+        '400':
+           description: Invalid input provided (e.g., invalid name format).
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        '404':
+           description: Space not found.
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error during creation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}/sandboxes/{sandbox_id}:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: The identifier of the space containing the sandbox.
+        schema:
+          type: string
+      - name: sandbox_id
+        in: path
+        required: true
+        description: The unique identifier of the sandbox.
+        schema:
+          type: string
+          # format: uuid # If your IDs are UUIDs
+    get:
+      summary: Get sandbox details
+      description: Retrieves details for a specific sandbox.
+      operationId: getSandbox
+      responses:
+        '200':
+          description: Sandbox details.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Sandbox'
-  "/spaces/{space}/sandboxes/{name}/tools:run_ipython_cell":
-    post:
-      summary: "Invoke a cell in a stateful IPython (Jupyter) kernel."
-      operationId: "runIPythonCell"
-      parameters:
-      - name: space
-        in: path
-        required: true
-        description: The space the sandbox lives in.
-        schema:
-          type: string
-      - name: name
-        in: path
-        required: true
-        description: The name of the sandbox.
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RunIPythonCellRequest'
-      responses:
-        '200':
-          description: OK
+        '404':
+          description: Sandbox or Space not found.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RunIPythonCellResult'
-  "/spaces/{space}/sandboxes/{name}/tools:run_shell_command":
-    post:
-      summary: "Run a shell command."
-      operationId: "runShellCommand"
-      parameters:
-      - name: space
-        in: path
-        required: true
-        description: The space the sandbox lives in.
-        schema:
-          type: string
-      - name: name
-        in: path
-        required: true
-        description: The name of the sandbox.
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RunShellCommandRequest'
-      responses:
-        '200':
-          description: OK
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RunShellCommandResult'
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a sandbox
+      description: Deletes an existing sandbox and its associated resources.
+      operationId: deleteSandbox
+      responses:
+        '204':
+          description: Sandbox deleted successfully.
+        '404':
+          description: Sandbox or Space not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}/sandboxes/{sandbox_id}/shell:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: Space ID.
+        schema:
+          type: string
+      - name: sandbox_id
+        in: path
+        required: true
+        description: Sandbox ID.
+        schema:
+          type: string
+    post:
+      summary: Execute a shell command in the sandbox
+      description: Runs a shell command asynchronously and returns an action ID for tracking. Observations are sent via WebSocket or internal callback.
+      operationId: runShellCommand
+      requestBody:
+        description: Shell command details.
+        required: true
+        content:
+          application/json:
+            schema:
+              # Reference the full model, but client might only send 'command'
+              $ref: "#/components/schemas/RunShellCommandRequest"
+              # Example of minimal client payload:
+              example:
+                command: "ls -l"
+                # timeout: 30 # Optional fields from client
+      responses:
+        "200": # Changed from 200 to 202 Accepted as it's async
+          description: Command execution accepted for processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action_id:
+                    type: string
+                    # format: uuid # If IDs are UUIDs
+                    description: Unique ID assigned to track this action's execution.
+        '404':
+           description: Sandbox or Space not found.
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        '400':
+           description: Invalid command input.
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}/sandboxes/{sandbox_id}/ipython:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: Space ID.
+        schema:
+          type: string
+      - name: sandbox_id
+        in: path
+        required: true
+        description: Sandbox ID.
+        schema:
+          type: string
+    post:
+      summary: Execute an IPython cell in the sandbox
+      description: Runs Python code asynchronously in an IPython kernel and returns an action ID. Observations are sent via WebSocket or internal callback.
+      operationId: runIPythonCell
+      requestBody:
+        description: IPython execution details. 
+        required: true
+        content:
+          application/json:
+            schema:
+              # Reference the full model, but client might only send 'code'
+              $ref: "#/components/schemas/RunIPythonCellRequest"
+              # Example of minimal client payload:
+              example:
+                code: "print('Hello from IPython')"
+                # timeout: 30 # Optional fields from client
+      responses:
+        "200": # Changed from 200 to 202 Accepted
+          description: IPython execution accepted for processing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  action_id:
+                    type: string
+                    # format: uuid # If IDs are UUIDs
+                    description: Unique ID assigned to track this action's execution.
+        '404':
+           description: Sandbox or Space not found.
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        '400':
+           description: Invalid code input.
+           content:
+             application/json:
+               schema:
+                 $ref: '#/components/schemas/Error'
+        default:
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /spaces/{space_id}/sandboxes/{sandbox_id}/stream:
+    parameters:
+      - name: space_id
+        in: path
+        required: true
+        description: Space ID.
+        schema:
+          type: string
+      - name: sandbox_id
+        in: path
+        required: true
+        description: Sandbox ID.
+        schema:
+          type: string
+    get:
+      summary: Stream real-time observations from a sandbox
+      description: Establishes a WebSocket connection to stream observations (start, stream, result, error, end) from a sandbox.
+      operationId: streamObservations
+      responses:
+        "101": # Switching Protocols
+          description: WebSocket connection established. Data format follows the Observation schema.
+          # WebSocket responses aren't typically defined with content schemas in OpenAPI 3.0
+
+# Optional: Define internal observation endpoint if needed for documentation
+# /internal/observations/{sandbox_id}: ...
+
 components:
   schemas:
+    # --- Schemas generated directly from Python models ---
     Error:
       type: object
       properties:
         message:
           type: string
-          description: The error message.
+          description: Error message
+        detail:
+          type: string
+          nullable: true
+          description: Detailed error information
+        code:
+          type: string
+          nullable: true
+          description: Error code for programmatic handling
       required:
       - message
+      description: Error response model
+
+    SandboxSpec:
+      type: object
+      properties:
+        image:
+          type: string
+          minLength: 1
+          nullable: true
+          description: Container image for the sandbox (must include tag e.g. 'python:3.9')
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          nullable: true
+          description: Environment variables for the sandbox
+        resources:
+          type: object
+          additionalProperties: {} # Allows any type for values
+          nullable: true
+          description: Resource limits configuration
+      description: Sandbox specification model
+
+    SandboxStatus:
+      type: object
+      properties:
+        state:
+          type: string
+          pattern: "^(running|stopped|error|unknown)$"
+          nullable: true
+          description: Current state of the sandbox
+        start_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: Sandbox start time
+        ready:
+          type: boolean
+          nullable: true
+          description: Whether the sandbox is ready
+      description: Sandbox status information
+
+    RunIPythonCellRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: Code to execute in IPython kernel
+        timeout:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+          description: Execution timeout in seconds
+        work_dir:
+          type: string
+          nullable: true
+          description: Working directory for execution
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          nullable: true
+          description: Execution environment variables
+        action_id:
+          type: string
+          nullable: true
+          description: Action ID provided by runtime for observation tracking (Used internally between runtime and agent)
+        split_output:
+          type: boolean
+          default: false
+          nullable: true
+          description: Whether to split stdout and stderr in observations/results (Currently ignored by executor)
+      required:
+      - code
+      description: Request model for executing IPython cell
+
+    RunShellCommandRequest:
+      type: object
+      properties:
+        command:
+          type: string
+          minLength: 1
+          description: Command to execute
+        timeout:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+          description: Execution timeout in seconds
+        work_dir:
+          type: string
+          nullable: true
+          description: Working directory for execution
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          nullable: true
+          description: Execution environment variables
+        action_id:
+          type: string
+          nullable: true
+          description: Action ID provided by runtime for observation tracking (Used internally between runtime and agent)
+        split_output:
+          type: boolean
+          default: false
+          nullable: true
+          description: Whether to split stdout and stderr in observations/results (Currently ignored by executor)
+      required:
+      - command
+      description: Request model for executing shell command
+
+    ActionResult:
+      type: object
+      properties:
+        action_id:
+          type: string
+          description: Identifier of the action this result belongs to
+        exit_code:
+          type: integer
+          format: int32
+          description: Exit code of the executed command or cell
+        error:
+          type: string
+          nullable: true
+          description: Error message if execution failed
+      required:
+      - action_id
+      - exit_code
+      description: Result of an action execution, typically sent as an observation
+
+    Observation:
+      type: object
+      properties:
+        observation_type:
+          type: string
+          pattern: "^(start|stream|result|error|end)$"
+          description: Type of observation (e.g., start, stream, result, error, end)
+        action_id:
+          type: string
+          description: Identifier of the action this observation relates to
+        timestamp:
+          type: string
+          format: date-time
+          description: Timestamp when the observation was generated (UTC)
+        stream:
+          type: string
+          pattern: "^(stdout|stderr)$"
+          nullable: true
+          description: Stream type if observation_type is 'stream'
+        line:
+          type: string
+          nullable: true
+          description: Content of the stream line if observation_type is 'stream'
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+          description: Exit code if observation_type is 'result' or 'end'
+        error:
+          type: string
+          nullable: true
+          description: Error message if observation_type is 'error', 'result' or 'end'
+      required:
+      - observation_type
+      - action_id
+      - timestamp
+      description: Model for observations pushed from agent to runtime or streamed via WebSocket
+
     CreateSandboxRequest:
       type: object
       properties:
         name:
           type: string
-          description: The name of the sandbox. If not specified, will be generated automatically.
-          x-go-type-skip-optional-pointer: true
+          minLength: 1
+          maxLength: 63
+          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          nullable: true
+          description: Name of the sandbox. If not specified, will be auto-generated
         spec:
-          $ref: '#/components/schemas/SandboxSpec'
-      required:
-      - spec
+          nullable: true # Making spec itself optional here
+          allOf: # Use allOf to reference potentially nullable schema
+            - $ref: '#/components/schemas/SandboxSpec'
+        space:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          default: default
+          nullable: true # Allow omitting it to use default
+          description: Space the sandbox belongs to
+      description: Request model for creating a sandbox
+
     Sandbox:
       type: object
-      description: A sandbox environment for running code and commands.
+      properties:
+        sandbox_id:
+          type: string
+          minLength: 1
+          description: Unique identifier for the sandbox
+        name:
+          type: string
+          nullable: true
+          description: Name of the sandbox
+        spec:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/SandboxSpec'
+        status:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/SandboxStatus'
+        space:
+          type: string
+          default: default
+          nullable: true
+          description: Space the sandbox belongs to
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Sandbox creation time
+        agent_url:
+           type: string
+           format: uri # Assuming it's a URL
+           nullable: true
+           description: URL to access the agent inside the sandbox
+      required:
+      - sandbox_id
+      description: Sandbox resource model
+
+    Space:
+      type: object
+      properties:
+        space_id:
+          type: string
+          minLength: 1
+          description: Unique identifier for the space
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          description: Name of the space
+        description:
+          type: string
+          nullable: true
+          description: Description of the space
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Space creation time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Space last update time
+        metadata:
+          type: object
+          additionalProperties: {}
+          nullable: true
+          description: Space metadata
+      required:
+      - space_id
+      - name
+      description: Space resource model
+
+    CreateSpaceRequest:
+      type: object
       properties:
         name:
           type: string
-          description: The name of the sandbox.
-          x-go-type-skip-optional-pointer: true
-        uid:
+          minLength: 1
+          maxLength: 63
+          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          description: Name of the space
+        description:
           type: string
-          description: An identifier that is unique to the instance (in time) of the sandbox.
-          readOnly: true
-          x-go-name: UID
-          x-go-type-skip-optional-pointer: true
-        spec:
-          $ref: '#/components/schemas/SandboxSpec'
-        status:
-          $ref: '#/components/schemas/SandboxStatus'
-          readOnly: true
-      required:
-        - spec
-    SandboxSpec:
-      type: object
-      description: The specification of a Sandbox.
-      properties:
-        image: 
-          type: string
-          description: The container image the sandbox will run with.
-          x-go-type-skip-optional-pointer: true
-        env:
+          nullable: true
+          description: Description of the space
+        metadata:
           type: object
-          description: Environment variables for the sandbox.
-          additionalProperties:
-            type: string
-          x-go-type-skip-optional-pointer: true
-    SandboxStatus:
-      type: object
-      description: The status of the Sandbox.
-      properties: {}
-    RunIPythonCellRequest:
-      type: object
-      description: "The cell to run."
-      properties:
-        code:
-          type: string
-          description: The code to run in the IPython kernel.
-        split_output:
-          type: boolean
-          description: Set to true to split the output into stdout and stderr. If set, the output field in the response will be empty and the stdout and stderr fields will be populated.
-          default: false
-          x-go-type-skip-optional-pointer: true
+          additionalProperties: {}
+          nullable: true
+          description: Space metadata
       required:
-      - code
-    RunIPythonCellResult:
+      - name
+      description: Request model for creating a space
+
+    UpdateSpaceRequest:
       type: object
-      description: The result from the IPython kernel.
       properties:
-        output:
+        description:
           type: string
-          description: The stdout and stderr from the IPython kernel interleaved.
-          x-go-type-skip-optional-pointer: true
-        stdout:
-          type: string
-          description: The stdout from the IPython kernel.
-          x-go-type-skip-optional-pointer: true
-        stderr:
-          type: string
-          description: The stderr from the IPython kernel.
-          x-go-type-skip-optional-pointer: true
-    RunShellCommandRequest:
-      type: object
-      description: "The command to run."
-      properties:
-        command:
-          type: string
-          description: The command to execute.
-        split_output:
-          type: boolean
-          default: false
-          description: Set to true to split the output into stdout and stderr. If set, the output field in the response will be empty and the stdout and stderr fields will be populated.
-          x-go-type-skip-optional-pointer: true
-      required:
-      - command
-    RunShellCommandResult:
-      type: object
-      description: The result from the shell command.
-      properties:
-        output:
-          type: string
-          description: The stdout and stderr from the shell command.
-          x-go-type-skip-optional-pointer: true
-        stdout:
-          type: string
-          description: The stdout from the shell command
-          x-go-type-skip-optional-pointer: true
-        stderr:
-          type: string
-          description: The stderr from the shell command.
-          x-go-type-skip-optional-pointer: true
+          nullable: true
+          description: New description for the space
+        metadata:
+          type: object
+          additionalProperties: {}
+          nullable: true
+          description: New metadata for the space
+      description: Request model for updating a space

@@ -17,7 +17,7 @@ print("<<<<<< EXECUTOR CODE VERSION: TIMESTAMP_FIXED >>>>>>", flush=True)
 # otherwise define minimal ones here if needed for request validation/typing.
 # Assuming they are accessible via sandboxai.api.v1 as before
 try:
-    from sandboxai.api.v1 import (
+    from mentis_client.api import (
         RunIPythonCellRequest,
         # RunIPythonCellResult, # Not used directly as response model anymore
         RunShellCommandRequest,
@@ -152,31 +152,71 @@ def run_ipython_cell(request: RunIPythonCellRequest):
                     "line": stderr
                 })
 
-            # Send result observation
+            # 在 run_ipython_cell 函数内部，找到处理 exec_result 失败的部分
+# (大约在 try...except 块之后，检查 exec_result.error_before_exec 或 exec_result.error_in_exec 的地方)
+
+        # Send result observation
             if exec_result.error_before_exec or exec_result.error_in_exec:
                 exit_code = 1
-                try:
-                    ex_type, ex_value, tb = ipy.InteractiveTB.get_exc_info(exec_result.error_in_exec or exec_result.error_before_exec)
-                    stb = ipy.InteractiveTB.structured_traceback(ex_type, ex_value, tb)
-                    tb_lines = ipy.InteractiveTB.format_structured_traceback(stb)
-                    error_message = "".join(tb_lines)
-                    logger.error(f"[AGENT] IPython execution error captured. ActionID: {action_id}\n{error_message}")
-                except Exception as format_err:
-                    logger.error(f"[AGENT] Failed to format IPython traceback. ActionID: {action_id}. Error: {format_err}")
-                    error_message = str(exec_result.error_in_exec or exec_result.error_before_exec) or "Unknown IPython execution error"
+                error_name = "UnknownError"
+                error_value = "Unknown error occurred during IPython execution."
+                formatted_tb = [] # Initialize as empty list
 
+                # --- 修改开始: 尝试获取结构化错误信息 ---
+                error_info = exec_result.error_in_exec or exec_result.error_before_exec
+                if error_info:
+                    try:
+                        # error_info should be a tuple (etype, evalue, tb)
+                        ex_type, ex_value, tb = error_info
+                        error_name = ex_type.__name__
+                        error_value = str(ex_value)
+
+                        # Use InteractiveTB for formatting if available and working
+                        # Ensure ipy.InteractiveTB exists and has necessary methods
+                        if hasattr(ipy, 'InteractiveTB') and hasattr(ipy.InteractiveTB, 'structured_traceback'):
+                            # Get structured traceback
+                            stb = ipy.InteractiveTB.structured_traceback(ex_type, ex_value, tb)
+                            # Format it into a list of strings
+                            formatted_tb = ipy.InteractiveTB.format_structured_traceback(stb)
+                            logger.debug(f"[AGENT] Successfully formatted IPython traceback. ActionID: {action_id}")
+                        else:
+                            # Fallback to standard traceback formatting if InteractiveTB fails or is unavailable
+                            formatted_tb = traceback.format_exception(ex_type, ex_value, tb)
+                            logger.warning(f"[AGENT] Using standard traceback formatting as InteractiveTB formatting failed or is unavailable. ActionID: {action_id}")
+
+                    except Exception as format_err:
+                        # Handle errors during extraction/formatting
+                        logger.error(f"[AGENT] Failed to extract/format IPython traceback info. ActionID: {action_id}. Error: {format_err}", exc_info=True)
+                        # Use simpler info if possible
+                        if error_info and isinstance(error_info, tuple) and len(error_info) >= 2:
+                            error_name = getattr(error_info[0], '__name__', 'UnknownError')
+                            error_value = str(error_info[1]) if error_info[1] else "Error value unavailable"
+                        else:
+                            error_value = str(error_info) # Fallback to string representation of whatever error_info is
+                        formatted_tb = ["Traceback formatting failed."]
+                # --- 修改结束 ---
+
+                # 发送包含结构化错误信息的 result 观测
                 send_observation(runtime_observation_url, {
-                    "observation_type": "result", # Correct key
+                    "observation_type": "result", # Key for observation type
                     "action_id": action_id,
                     "exit_code": exit_code,
-                    "error": error_message
+                    # --- 使用新的字段名 ---
+                    "status": "error", # Add status field expected by model
+                    "error_name": error_name,
+                    "error_value": error_value,
+                    "traceback": formatted_tb, # Send formatted traceback list
+                    # --- 不再发送简单的 'error' 字段 ---
+                    # "error": error_message # Remove this or keep it as supplemental if needed? Removing for strict alignment.
                 })
             else:
+                # Successful execution path remains similar
                 exit_code = 0
                 send_observation(runtime_observation_url, {
-                    "observation_type": "result", # Correct key
+                    "observation_type": "result",
                     "action_id": action_id,
-                    "exit_code": exit_code
+                    "exit_code": exit_code,
+                    "status": "ok" # Add status field expected by model
                     # Include exec_result.result if needed
                     # "result_data": exec_result.result # This can be complex
                 })
