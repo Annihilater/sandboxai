@@ -309,7 +309,7 @@ MentisSandbox 提供了一个全面的测试脚本 `test/test_sandbox.sh`，它�
     ./test/test_sandbox.sh
     ```
 
-更详细的测试指南，请查看 [TESTING.md](TESTING.md)。
+更详细的测试指南，请查看 [docs/TESTING.md](TESTING.md)。
 
 ## 系统架构
 
@@ -475,6 +475,8 @@ MentisSandbox 在处理并发请求时采用以下策略，以兼顾性能和状
 - 提供更多运行时环境选项 (例如 Node.js)
 - 增强资源监控和限制功能
 - 提供官方 Python 和 JavaScript/TypeScript 客户端库
+
+请参阅 [TODOLIST](docs/TODOLIST.md) 文档。
 
 ## 贡献指南
 
