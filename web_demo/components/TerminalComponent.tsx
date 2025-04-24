@@ -24,8 +24,7 @@ const TerminalComponent: React.FC<TerminalComponentProps> = ({ sandboxId, onComm
   const ws = useRef<WebSocket | null>(null);
   const commandHistory = useRef<string[]>([]);
   const historyIndex = useRef<number>(-1);
-  // currentLine ref is removed
-
+  const currentCommand = useRef<string>('');
   const [isClient, setIsClient] = useState(false);
   const resizeObserverRef = useRef<ResizeObserver | null>(null); // Ref for ResizeObserver
 
@@ -43,9 +42,9 @@ const TerminalComponent: React.FC<TerminalComponentProps> = ({ sandboxId, onComm
 
   // --- Display prompt function ---
   const prompt = useCallback(() => {
-      if(term.current) {
-        term.current.write('\r\n$ '); // Corrected prompt display
-      }
+    if (term.current) {
+      term.current.write('\r\n$ ');
+    }
   }, []); // No dependencies needed if it only uses refs
 
   const connectWebSocket = useCallback(() => {
@@ -53,102 +52,78 @@ const TerminalComponent: React.FC<TerminalComponentProps> = ({ sandboxId, onComm
       onLog('Cannot connect: Sandbox ID is missing.');
       return;
     }
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      onLog('WebSocket already connected.');
-      return;
-    }
 
     cleanupWebSocket();
 
     const wsUrl = `ws://${window.location.hostname || 'localhost'}:5266/v1/sandboxes/${sandboxId}/stream`;
     onLog(`Attempting to connect WebSocket: ${wsUrl}`);
+    
     if (term.current) {
-        // Correctly escaped ANSI codes
-        term.current.writeln(`\r\n\x1b[1;34mINFO: Connecting WebSocket to ${wsUrl}...\x1b[0m`);
+      term.current.writeln(`\r\n\x1b[1;34mINFO: Connecting WebSocket to ${wsUrl}...\x1b[0m`);
     }
 
     try {
-        ws.current = new WebSocket(wsUrl);
+      ws.current = new WebSocket(wsUrl);
 
-        ws.current.onopen = () => {
-            onLog('WebSocket Connected!');
-            if(term.current){
-                // Correctly escaped ANSI codes
-                term.current.writeln(`\r\n\x1b[1;32mINFO: WebSocket Connected to Sandbox ${sandboxId}!\x1b[0m`);
-                prompt();
-            }
-        };
-
-        ws.current.onmessage = (event) => {
-            onLog(`WS MSG: ${event.data.substring(0, 200)}...`);
-            try {
-                const obs = JSON.parse(event.data);
-                 if (term.current) {
-                    const obsType = obs.observation_type;
-                    const line = obs.line;
-
-                    if (obsType === 'stream' && line !== null && line !== undefined) {
-                        term.current.write(line.replace(/\r\n|\n|\r/g, '\r\n'));
-                    } else if (obsType === 'result') {
-                        const exitCode = obs.exit_code;
-                        const error = obs.error || obs.error_value || (obs.error_name ? `${obs.error_name}: ${obs.error_value}`: null);
-                        if (exitCode !== 0 || error) {
-                            // Correctly escaped ANSI codes
-                            term.current.writeln(`\r\n\x1b[1;31m[Command finished with Exit Code: ${exitCode}, Error: ${error || 'N/A'}]\x1b[0m`);
-                        } else {
-                            // Correctly escaped ANSI codes
-                            term.current.writeln(`\r\n\x1b[1;32m[Command finished successfully (Exit Code: ${exitCode})]\x1b[0m`);
-                        }
-                    } else if (obsType === 'end') {
-                        // Correctly escaped ANSI codes
-                        term.current.writeln(`\x1b[1;34m[Action finished]\x1b[0m`);
-                        prompt();
-                    } else if (obsType === 'error') {
-                         // Correctly escaped ANSI codes
-                         term.current.writeln(`\r\n\x1b[1;31m[System Error: ${obs.message || JSON.stringify(obs)}]\x1b[0m`);
-                         prompt();
-                    } else if (obsType === 'start') {
-                         // Correctly escaped ANSI codes
-                         term.current.writeln(`\x1b[36m[Action started: ${obs.action_id}]\x1b[0m`);
-                    }
-                 }
-            } catch (e) {
-                console.error("Failed to parse WebSocket message:", e);
-                onLog(`ERROR parsing message: ${event.data}`);
-                if(term.current) {
-                    // Correctly escaped ANSI codes
-                    term.current.writeln(`\r\n\x1b[1;31mERROR: Received unparseable message\x1b[0m`);
-                }
-            }
-        };
-
-        ws.current.onerror = (error) => {
-            console.error("WebSocket Error:", error);
-            onLog(`ERROR: WebSocket connection error. See browser console.`);
-            if(term.current) {
-                // Correctly escaped ANSI codes
-                term.current.writeln(`\r\n\x1b[1;31mERROR: WebSocket connection error.\x1b[0m`);
-            }
-        };
-
-        ws.current.onclose = (event) => {
-            onLog(`WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason || 'N/A'}`);
-             if(term.current) {
-                // Correctly escaped ANSI codes
-                term.current.writeln(`\r\n\x1b[1;33mINFO: WebSocket disconnected.\x1b[0m`);
-             }
-            ws.current = null;
-        };
-    } catch (err) {
-        let errorMsg = 'Unknown WebSocket error';
-        if (err instanceof Error) errorMsg = err.message;
-        onLog(`ERROR creating WebSocket: ${errorMsg}`);
-        if(term.current) {
-            // Correctly escaped ANSI codes
-            term.current.writeln(`\r\n\x1b[1;31mERROR: Could not create WebSocket connection.\x1b[0m`);
+      ws.current.onopen = () => {
+        onLog('WebSocket Connected!');
+        if (term.current) {
+          term.current.writeln(`\r\n\x1b[1;32mINFO: WebSocket Connected to Sandbox ${sandboxId}!\x1b[0m`);
+          prompt();
         }
+      };
+
+      ws.current.onmessage = (event) => {
+        try {
+          const obs = JSON.parse(event.data);
+          if (term.current) {
+            const obsType = obs.observation_type;
+            const line = obs.line;
+
+            if (obsType === 'stream' && line !== null && line !== undefined) {
+              term.current.write(line.replace(/\r\n|\n|\r/g, '\r\n'));
+            } else if (obsType === 'result') {
+              const exitCode = obs.exit_code;
+              const error = obs.error || obs.error_value || (obs.error_name ? `${obs.error_name}: ${obs.error_value}` : null);
+              if (exitCode !== 0 || error) {
+                term.current.writeln(`\r\n\x1b[1;31m[Command finished with Exit Code: ${exitCode}, Error: ${error || 'N/A'}]\x1b[0m`);
+              } else {
+                term.current.writeln(`\r\n\x1b[1;32m[Command finished successfully (Exit Code: ${exitCode})]\x1b[0m`);
+              }
+              prompt();
+            } else if (obsType === 'end') {
+              term.current.writeln(`\x1b[1;34m[Action finished]\x1b[0m`);
+              prompt();
+            } else if (obsType === 'error') {
+              term.current.writeln(`\r\n\x1b[1;31m[System Error: ${obs.message || JSON.stringify(obs)}]\x1b[0m`);
+              prompt();
+            } else if (obsType === 'start') {
+              term.current.writeln(`\x1b[36m[Action started: ${obs.action_id}]\x1b[0m`);
+            }
+          }
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error);
+        }
+      };
+
+      ws.current.onclose = () => {
+        onLog('WebSocket connection closed.');
+        if (term.current) {
+          term.current.writeln('\r\n\x1b[1;31mINFO: WebSocket connection closed.\x1b[0m');
+        }
+      };
+
+      ws.current.onerror = (error) => {
+        onLog(`WebSocket error: ${error}`);
+        if (term.current) {
+          term.current.writeln('\r\n\x1b[1;31mERROR: WebSocket connection error.\x1b[0m');
+        }
+      };
+    } catch (error) {
+      console.error('Error creating WebSocket:', error);
+      onLog(`Error creating WebSocket: ${error}`);
     }
-  }, [sandboxId, onLog, cleanupWebSocket, prompt]); // Added prompt to dependencies
+  }, [sandboxId, onLog, cleanupWebSocket, prompt]);
 
   // --- Initialization Effect (Client-side only) ---
   useEffect(() => {

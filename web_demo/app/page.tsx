@@ -1,151 +1,255 @@
-// Filepath: app/page.tsx (Corrected with Dynamic Import)
-'use client'; // Mark as client component
+// Filepath: app/page.tsx
+'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import dynamic from 'next/dynamic'; // <-- 1. 导入 dynamic
+import dynamic from 'next/dynamic';
 import DebugView from '@/components/DebugView';
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-// --- 2. 动态导入 TerminalComponent，并禁用 SSR ---
 const TerminalComponent = dynamic(() => import('@/components/TerminalComponent'), {
-  ssr: false, // <--- 关键：禁止服务器端渲染
-  loading: () => <div className="w-full h-full flex items-center justify-center bg-black text-white"><p>Loading Terminal...</p></div> // 可选的加载状态
+  ssr: false,
+  loading: () => <div className="w-full h-full flex items-center justify-center bg-black text-white"><p>Loading Terminal...</p></div>
 });
-// --- 结束动态导入 ---
+
+interface Sandbox {
+  id: string;
+  isRunning: boolean;
+  agentUrl: string;
+  containerId: string;
+}
 
 export default function HomePage() {
   const [sandboxId, setSandboxId] = useState<string | null>(null);
-  const [inputValue, setInputValue] = useState<string>('');
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [debugLogs, setDebugLogs] = useState<string[]>(['Debug view initialized.']);
-  // webSocketRef 不再需要在这里管理，由 TerminalComponent 内部管理
+  const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
-  // 回调函数，用于将日志添加到 DebugView
   const addLog = useCallback((message: string) => {
-    console.log("Adding log:", message); // Also log to console
+    console.log("Adding log:", message);
     setDebugLogs(prevLogs => [
-        `[${new Date().toLocaleTimeString()}] ${message}`,
-         ...prevLogs // Add new log to the top
-        ].slice(0, 100) // Keep last 100 logs
-    );
+      `[${new Date().toLocaleTimeString()}] ${message}`,
+      ...prevLogs
+    ].slice(0, 100));
   }, []);
 
-  // 处理连接按钮点击
-  const handleConnect = useCallback(() => {
-    if (inputValue) {
-      addLog(`Setting Sandbox ID and attempting connection: ${inputValue}`);
-      setSandboxId(inputValue); // This will trigger the TerminalComponent's useEffect to connect
-      setIsConnected(true); // Assume connection attempt starts, TerminalComponent handles actual state
-    } else {
-      addLog("Please enter a Sandbox ID.");
-    }
-  }, [inputValue, addLog]);
-
-  // 处理断开连接按钮点击
-  const handleDisconnect = useCallback(() => {
-     addLog("Disconnect button clicked. Triggering disconnect.");
-     setSandboxId(null); // Setting ID to null triggers disconnect in TerminalComponent
-     setIsConnected(false); // Update UI state immediately
-  }, [addLog]);
-
-
-  // --- 发送命令到 Next.js API 代理 ---
-  const handleSendCommand = useCallback(async (command: string, type: 'shell' | 'ipython') => {
+  const handleCommand = useCallback(async (command: string, type: 'shell' | 'ipython') => {
     if (!sandboxId) {
-        addLog("Cannot send command: Not connected to a sandbox.");
-        // Optionally re-prompt in terminal? TerminalComponent handles its prompt.
-        return;
+      addLog("Cannot send command: Not connected to a sandbox.");
+      return;
     }
     addLog(`Sending ${type} command via API proxy: ${command.substring(0, 50)}...`);
 
     try {
-        const response = await fetch('/api/sandbox/execute', { // Call the Next.js API route
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                sandboxId: sandboxId,
-                command: command,
-                type: type,
-            }),
-        });
+      const response = await fetch('/api/sandbox/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sandboxId: sandboxId,
+          command: command,
+          type: type,
+        }),
+      });
 
-        const data = await response.json();
+      const data = await response.json();
 
-        if (!response.ok) {
-            addLog(`ERROR sending command (HTTP ${response.status}): ${data.error || JSON.stringify(data)}`);
-        } else {
-            addLog(`Command accepted by server. Action ID: ${data.action_id}`);
-        }
+      if (!response.ok) {
+        addLog(`ERROR sending command (HTTP ${response.status}): ${data.error || JSON.stringify(data)}`);
+      } else {
+        addLog(`Command accepted by server. Action ID: ${data.action_id}`);
+      }
     } catch (error) {
-        let errorMsg = 'Unknown error';
-        if (error instanceof Error) errorMsg = error.message;
-        console.error("Error sending command via proxy:", error);
-        addLog(`NETWORK ERROR sending command: ${errorMsg}`);
+      let errorMsg = 'Unknown error';
+      if (error instanceof Error) errorMsg = error.message;
+      console.error("Error sending command via proxy:", error);
+      addLog(`NETWORK ERROR sending command: ${errorMsg}`);
     }
   }, [sandboxId, addLog]);
 
+  const fetchSandboxes = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const response = await fetch('/api/sandbox/list');
+      if (!response.ok) {
+        throw new Error('Failed to fetch sandboxes');
+      }
+      const data = await response.json();
+      setSandboxes(data.sandboxes);
+      addLog(`Fetched ${data.sandboxes.length} sandboxes`);
+    } catch (error) {
+      console.error('Error fetching sandboxes:', error);
+      addLog(`Error fetching sandboxes: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [addLog]);
 
-  // Note: Connection status (isConnected) is simplified here.
-  // A robust solution would involve TerminalComponent emitting status changes
-  // back to this parent component via a callback prop.
+  const handleCreateSandbox = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      const response = await fetch('/api/sandbox/create', {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to create sandbox');
+      }
+      const data = await response.json();
+      addLog(`Created new sandbox: ${data.id}`);
+      await fetchSandboxes();
+      setSandboxId(data.id);
+      setIsConnected(true);
+    } catch (error) {
+      console.error('Error creating sandbox:', error);
+      addLog(`Error creating sandbox: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [addLog, fetchSandboxes]);
+
+  const handleSelectSandbox = useCallback((id: string) => {
+    console.log('Selected sandbox:', id);
+    setSandboxId(id);
+    setIsConnected(true);
+    addLog(`Selected sandbox: ${id}`);
+  }, [addLog]);
+
+  const handleDisconnect = useCallback(() => {
+    addLog("Disconnect button clicked. Triggering disconnect.");
+    setSandboxId(null);
+    setIsConnected(false);
+  }, [addLog]);
+
   useEffect(() => {
-      setIsConnected(!!sandboxId);
-  }, [sandboxId]);
-
+    fetchSandboxes();
+  }, [fetchSandboxes]);
 
   return (
-    <div className="flex flex-col h-screen p-4 bg-gray-100 dark:bg-gray-900 space-y-4">
-      <h1 className="text-2xl font-bold text-center text-gray-800 dark:text-gray-200">Mentis Sandbox Web Example</h1>
+    <div className="flex flex-col h-screen bg-slate-50 p-4 space-y-4">
+      <div className="flex-1 flex space-x-4 min-h-0">
+        <div className="w-[400px] flex flex-col space-y-4">
+          <Card className="flex-1 shadow-lg border-slate-200">
+            <CardHeader className="pb-3 space-y-1.5">
+              <CardTitle className="text-xl font-semibold text-slate-800">Sandbox Control</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-6">
+                <div className="flex flex-col space-y-4">
+                  <div className="grid grid-cols-5 gap-2">
+                    <Button 
+                      onClick={handleCreateSandbox}
+                      disabled={isLoading}
+                      className="col-span-4 bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm"
+                    >
+                      {isLoading ? 'Creating...' : 'Create New Sandbox'}
+                    </Button>
+                    <Button 
+                      onClick={fetchSandboxes}
+                      disabled={isLoading}
+                      variant="outline"
+                      className="border-slate-200 hover:bg-slate-50 shadow-sm text-slate-600"
+                      title="Refresh sandbox list"
+                    >
+                      ↻
+                    </Button>
+                  </div>
+                  
+                  <div className="space-y-2.5">
+                    <label className="text-sm font-semibold text-slate-700">Select Sandbox</label>
+                    <Select
+                      value={sandboxId || ''}
+                      onValueChange={handleSelectSandbox}
+                    >
+                      <SelectTrigger 
+                        className="w-full bg-white border-slate-200 shadow-sm hover:border-slate-300 transition-colors"
+                      >
+                        <SelectValue placeholder="Select a sandbox" />
+                      </SelectTrigger>
+                      <SelectContent 
+                        className="bg-white border border-slate-200 shadow-lg max-h-[300px] w-[400px] overflow-hidden"
+                        position="popper"
+                        sideOffset={4}
+                      >
+                        <div className="p-1">
+                          {sandboxes.map((sandbox) => (
+                            <SelectItem 
+                              key={sandbox.id} 
+                              value={sandbox.id}
+                              disabled={!sandbox.isRunning}
+                              className="hover:bg-slate-50 focus:bg-slate-50 cursor-pointer rounded-md mb-1 last:mb-0"
+                            >
+                              <div className="flex flex-col py-2 px-1">
+                                <div className="flex items-center space-x-2">
+                                  <span className={`w-2 h-2 rounded-full ${
+                                    sandbox.isRunning 
+                                      ? 'bg-green-500' 
+                                      : 'bg-red-500'
+                                  }`} />
+                                  <span className="font-mono text-sm truncate flex-1">{sandbox.id}</span>
+                                </div>
+                                <div className="mt-1 flex items-center space-x-2">
+                                  <span className={`text-xs font-medium ${
+                                    sandbox.isRunning 
+                                      ? 'text-green-600' 
+                                      : 'text-red-600'
+                                  }`}>
+                                    {sandbox.isRunning ? 'Running' : 'Stopped'}
+                                  </span>
+                                  <span className="text-xs text-slate-400">
+                                    {sandbox.containerId}
+                                  </span>
+                                </div>
+                              </div>
+                            </SelectItem>
+                          ))}
+                        </div>
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-      {/* --- Controls --- */}
-      <Card>
-        <CardContent className="p-4 flex flex-wrap items-center gap-4">
-          <label htmlFor="sandboxIdInput" className="font-medium text-gray-700 dark:text-gray-300">
-            Sandbox ID:
-          </label>
-          <Input
-            id="sandboxIdInput"
-            type="text"
-            placeholder="Enter Sandbox ID"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            disabled={isConnected} // Disable input when connected
-            className="w-64"
-          />
-          <Button onClick={handleConnect} disabled={isConnected || !inputValue}>
-            Connect
-          </Button>
-          <Button onClick={handleDisconnect} disabled={!isConnected} variant="destructive">
-            Disconnect
-          </Button>
-          <span className={`ml-4 px-3 py-1 rounded text-sm font-medium ${isConnected ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'}`}>
-            Status: {isConnected ? 'Connected (Attempting)' : 'Disconnected'}
-          </span>
-        </CardContent>
-      </Card>
+                  <Button 
+                    onClick={handleDisconnect}
+                    disabled={!isConnected}
+                    variant="destructive"
+                    className="w-full bg-red-500 hover:bg-red-600 disabled:bg-slate-100 disabled:text-slate-400 shadow-sm font-medium"
+                  >
+                    Disconnect
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
 
-      {/* --- Terminal --- */}
-      <div className="flex-grow min-h-0 border rounded-md overflow-hidden shadow-sm"> {/* Added border/styling */}
-          {/* Render TerminalComponent only when sandboxId is set to trigger connection */}
-          {/* The component itself handles the ws connection based on the prop */}
-          <TerminalComponent
-              key={sandboxId} // Force re-mount on ID change if needed, might not be necessary
-              sandboxId={sandboxId}
-              onCommand={handleSendCommand}
-              onLog={addLog}
-          />
+        <div className="flex-1 flex flex-col space-y-4 min-w-0">
+          <Card className="flex-1 shadow-lg border-slate-200 overflow-hidden">
+            <CardHeader className="pb-3 border-b border-slate-100">
+              <CardTitle className="text-xl font-semibold text-slate-800">Terminal</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0 h-[calc(100%-4rem)]">
+              <TerminalComponent 
+                sandboxId={sandboxId}
+                onCommand={handleCommand}
+                onLog={addLog}
+              />
+            </CardContent>
+          </Card>
+        </div>
       </div>
 
-
-      {/* --- Debug View --- */}
-      <div className="flex-shrink-0 h-[220px]"> {/* Give DebugView fixed height */}
-          <DebugView logs={debugLogs} />
+      <div className="h-[280px]">
+        <Card className="h-full shadow-lg border-slate-200">
+          <CardHeader className="pb-3 border-b border-slate-100">
+            <CardTitle className="text-xl font-semibold text-slate-800">Debug Logs</CardTitle>
+          </CardHeader>
+          <CardContent className="h-[calc(100%-4rem)] p-0">
+            <DebugView logs={debugLogs} />
+          </CardContent>
+        </Card>
       </div>
-
     </div>
   );
 }
